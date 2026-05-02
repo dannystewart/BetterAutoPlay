@@ -49,6 +49,14 @@
       <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\UnityEngine.CoreModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\UnityEngine.UI.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\Unity.TextMeshPro.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="Sirenix.Serialization">
       <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\Sirenix.Serialization.dll</HintPath>
       <Private>False</Private>

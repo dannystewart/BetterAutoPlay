@@ -4,9 +4,14 @@ using System.Reflection;
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
+using BepInEx.Unity.IL2CPP.Utils;
 using HarmonyLib;
+using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using Nosebleed.Pancake.GameConfig;
 using Nosebleed.Pancake.Models;
+using TMPro;
+using UnityEngine;
+using UnityEngine.UI;
 
 namespace BetterAutoPlay
 {
@@ -24,7 +29,298 @@ namespace BetterAutoPlay
             LogSource = Log;
             var harmony = new Harmony(PluginGuid);
             harmony.PatchAll(typeof(BetterAutoPlayPlugin).Assembly);
+            IL2CPPChainloader.AddUnityComponent<AutoPlayVisualUpdater>();
             Log.LogInfo(PluginName + " loaded");
+        }
+    }
+
+    internal sealed class AutoPlayVisualUpdater : MonoBehaviour
+    {
+        public AutoPlayVisualUpdater(IntPtr ptr) : base(ptr) { }
+
+        private void Update()
+        {
+            AutoPlayUiController.Tick();
+        }
+    }
+
+    internal static class AutoPlayUiController
+    {
+        private const float IconRotationDegreesPerSecond = 180f;
+        private const float RainbowHueCyclesPerSecond = 0.35f;
+        private const string LogoFileName = "autoplay_logo.png";
+        private const string LogoObjectName = "BetterAutoPlayLogo";
+
+        private static bool s_persistentAutoPlay;
+        private static float s_hue;
+
+        private static PlayerModel s_player;
+        private static Button s_button;
+        private static TMP_Text s_label;
+        private static Transform s_iconTransform;
+        private static Image s_iconImage;
+        private static Image s_logoImage;
+        private static Sprite s_logoSprite;
+        private static bool s_logoLoadAttempted;
+
+        private static string s_defaultLabelText;
+        private static Color s_defaultLabelColor = Color.white;
+        private static Vector3 s_defaultIconEuler;
+        private static Vector3 s_defaultLogoEuler;
+        private static bool s_defaultsCaptured;
+
+        public static void Bind(PlayerModel player)
+        {
+            if (player == null)
+                return;
+
+            s_player = player;
+            var button = player.PlayAllButton;
+            if (button == null)
+                return;
+
+            if (s_button != button)
+            {
+                s_button = button;
+                s_label = TryFindLabel(button);
+                s_iconImage = TryFindIconImage(button);
+                s_logoImage = TryAttachOrGetLogo(button);
+                s_iconTransform = s_logoImage != null
+                    ? s_logoImage.transform
+                    : (s_iconImage != null ? s_iconImage.transform : button.transform);
+                CaptureDefaults();
+            }
+
+            ApplyStaticVisuals();
+        }
+
+        public static void OnAutoPlayButtonClicked(PlayerModel player)
+        {
+            Bind(player);
+
+            if (s_persistentAutoPlay)
+            {
+                s_persistentAutoPlay = false;
+                try { player?.StopAutoPlay(); } catch { }
+            }
+            else
+            {
+                s_persistentAutoPlay = true;
+                TryStartAutoPlay(player);
+            }
+
+            ApplyStaticVisuals();
+        }
+
+        public static void Tick()
+        {
+            if (!s_persistentAutoPlay)
+                return;
+
+            var player = s_player;
+            if (player == null)
+                return;
+
+            try
+            {
+                if (player.AutoPlayer != null && !player.AutoPlayer.IsPlaying)
+                    player.AutoPlayer.Play();
+            }
+            catch { }
+
+            float dt = Time.unscaledDeltaTime;
+            if (dt <= 0f)
+                return;
+
+            if (s_iconTransform != null)
+            {
+                var euler = s_iconTransform.localEulerAngles;
+                euler.z -= IconRotationDegreesPerSecond * dt;
+                s_iconTransform.localEulerAngles = euler;
+            }
+
+            if (s_label != null)
+            {
+                s_hue += RainbowHueCyclesPerSecond * dt;
+                s_hue -= Mathf.Floor(s_hue);
+                var rainbow = Color.HSVToRGB(s_hue, 1f, 1f);
+                rainbow.a = 1f;
+                s_label.color = rainbow;
+            }
+        }
+
+        private static void TryStartAutoPlay(PlayerModel player)
+        {
+            try
+            {
+                if (player?.AutoPlayer != null && !player.AutoPlayer.IsPlaying)
+                    player.AutoPlayer.Play();
+            }
+            catch { }
+        }
+
+        private static void CaptureDefaults()
+        {
+            s_defaultsCaptured = true;
+            s_defaultLabelText = s_label != null ? s_label.text : null;
+            s_defaultLabelColor = s_label != null ? s_label.color : Color.white;
+            s_defaultIconEuler = s_iconTransform != null ? s_iconTransform.localEulerAngles : Vector3.zero;
+            s_defaultLogoEuler = s_logoImage != null ? s_logoImage.transform.localEulerAngles : Vector3.zero;
+        }
+
+        private static void ApplyStaticVisuals()
+        {
+            if (!s_defaultsCaptured)
+                return;
+
+            if (s_persistentAutoPlay)
+            {
+                if (s_label != null)
+                    s_label.text = "Auto-playing";
+
+                if (s_logoImage != null)
+                    s_logoImage.gameObject.SetActive(true);
+            }
+            else
+            {
+                if (s_label != null)
+                {
+                    s_label.text = s_defaultLabelText;
+                    s_label.color = s_defaultLabelColor;
+                }
+
+                if (s_iconTransform != null)
+                    s_iconTransform.localEulerAngles = s_defaultIconEuler;
+
+                if (s_logoImage != null)
+                {
+                    s_logoImage.transform.localEulerAngles = s_defaultLogoEuler;
+                    s_logoImage.gameObject.SetActive(false);
+                }
+            }
+        }
+
+        private static TMP_Text TryFindLabel(Button button)
+        {
+            if (button == null) return null;
+            try { return button.GetComponentInChildren<TMP_Text>(); }
+            catch { return null; }
+        }
+
+        private static Image TryFindIconImage(Button button)
+        {
+            if (button == null) return null;
+
+            try
+            {
+                var byName = button.transform.Find("Icon");
+                if (byName != null)
+                {
+                    var namedImage = byName.GetComponent<Image>();
+                    if (namedImage != null)
+                        return namedImage;
+                }
+            }
+            catch { }
+
+            try
+            {
+                var direct = button.image;
+                if (direct != null)
+                    return direct;
+            }
+            catch { }
+
+            try { return button.GetComponentInChildren<Image>(); }
+            catch { return null; }
+        }
+
+        private static Image TryAttachOrGetLogo(Button button)
+        {
+            if (button == null)
+                return null;
+
+            var existing = button.transform.Find(LogoObjectName);
+            if (existing != null)
+            {
+                try { return existing.GetComponent<Image>(); }
+                catch { return null; }
+            }
+
+            var sprite = GetOrLoadLogoSprite();
+            if (sprite == null)
+                return null;
+
+            try
+            {
+                var go = new GameObject(LogoObjectName);
+                go.transform.SetParent(button.transform, false);
+
+                var image = go.AddComponent<Image>();
+                image.sprite = sprite;
+                image.raycastTarget = false;
+                image.preserveAspect = true;
+
+                var rt = go.GetComponent<RectTransform>();
+                rt.anchorMin = new Vector2(0.5f, 0.5f);
+                rt.anchorMax = new Vector2(0.5f, 0.5f);
+                rt.pivot = new Vector2(0.5f, 0.5f);
+                rt.anchoredPosition = Vector2.zero;
+                rt.sizeDelta = new Vector2(20f, 20f);
+
+                go.SetActive(false);
+                return image;
+            }
+            catch (Exception ex)
+            {
+                BetterAutoPlayPlugin.LogSource?.LogWarning("Could not create autoplay logo overlay: " + ex.Message);
+                return null;
+            }
+        }
+
+        private static Sprite GetOrLoadLogoSprite()
+        {
+            if (s_logoSprite != null)
+                return s_logoSprite;
+            if (s_logoLoadAttempted)
+                return null;
+
+            s_logoLoadAttempted = true;
+            var path = System.IO.Path.Combine(Paths.PluginPath, "BetterAutoPlay", LogoFileName);
+            if (!System.IO.File.Exists(path))
+            {
+                BetterAutoPlayPlugin.LogSource?.LogInfo("Autoplay logo not found at: " + path);
+                return null;
+            }
+
+            try
+            {
+                var bytes = System.IO.File.ReadAllBytes(path);
+                var texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                var il2cppBytes = new Il2CppStructArray<byte>(bytes.Length);
+                for (int i = 0; i < bytes.Length; i++)
+                    il2cppBytes[i] = bytes[i];
+
+                if (!ImageConversion.LoadImage(texture, il2cppBytes, false))
+                {
+                    BetterAutoPlayPlugin.LogSource?.LogWarning("Failed to decode autoplay logo PNG: " + path);
+                    return null;
+                }
+
+                texture.wrapMode = TextureWrapMode.Clamp;
+                texture.filterMode = FilterMode.Bilinear;
+                s_logoSprite = Sprite.Create(
+                    texture,
+                    new Rect(0f, 0f, texture.width, texture.height),
+                    new Vector2(0.5f, 0.5f),
+                    100f);
+                return s_logoSprite;
+            }
+            catch (Exception ex)
+            {
+                BetterAutoPlayPlugin.LogSource?.LogWarning("Could not load autoplay logo: " + ex.Message);
+                return null;
+            }
         }
     }
 
@@ -152,6 +448,26 @@ namespace BetterAutoPlay
                 BetterAutoPlayPlugin.LogSource.LogError("Custom combo sort failed; falling back to original sorter: " + ex);
                 return true;
             }
+        }
+    }
+
+    [HarmonyPatch(typeof(PlayerModel), "UpdatePlayerButtons")]
+    internal static class PlayerModelUpdateButtonsPatch
+    {
+        private static void Postfix(PlayerModel __instance)
+        {
+            try { AutoPlayUiController.Bind(__instance); }
+            catch { }
+        }
+    }
+
+    [HarmonyPatch(typeof(PlayerModel), "Button_AutoPlay")]
+    internal static class PlayerModelButtonAutoPlayPatch
+    {
+        private static bool Prefix(PlayerModel __instance)
+        {
+            AutoPlayUiController.OnAutoPlayButtonClicked(__instance);
+            return false;
         }
     }
 
@@ -316,6 +632,11 @@ namespace BetterAutoPlay
                     bestDecreasing = BetterCard(bestDecreasing, card, originalIndex, roles, manaGains);
             }
 
+            // When currently below zero mana-cost, prioritize climbing the combo ladder first.
+            // This ensures -1 -> 0 style transitions are not skipped by role-first heuristics.
+            if (previousMana < 0)
+                return bestStrictIncrease ?? bestManaGen ?? bestFlatNonGen ?? bestDecreasing;
+
             return bestManaGen ?? bestStrictIncrease ?? bestFlatNonGen ?? bestDecreasing;
         }
 
@@ -355,6 +676,15 @@ namespace BetterAutoPlay
             Dictionary<CardModel, int> manaGains)
         {
             if (current == null) return candidate;
+
+            // Prefer negative mana cards over non-negative cards to preserve
+            // valid negative->zero combo openings.
+            int candidateMana = GetManaCost(candidate);
+            int currentMana = GetManaCost(current);
+            bool candidateNegative = candidateMana < 0;
+            bool currentNegative = currentMana < 0;
+            if (candidateNegative != currentNegative)
+                return candidateNegative ? candidate : current;
 
             int r = GetRole(candidate, roles).CompareTo(GetRole(current, roles));
             if (r < 0) return candidate;
@@ -431,22 +761,14 @@ namespace BetterAutoPlay
         {
             if (card == null) return int.MaxValue;
             try { return card.GetCardCostTypeManaCost(false); }
-            catch
-            {
-                try { return card.GetCardCostTypeManaCost(); }
-                catch { return int.MaxValue; }
-            }
+            catch { return int.MaxValue; }
         }
 
         private static int GetComboCost(CardModel card)
         {
             if (card == null) return int.MaxValue;
             try { return card.GetCardComboCost(false); }
-            catch
-            {
-                try { return card.GetCardComboCost(); }
-                catch { return int.MaxValue; }
-            }
+            catch { return int.MaxValue; }
         }
 
         private static Dictionary<CardModel, int> BuildOriginalIndex(List<CardModel> input)
