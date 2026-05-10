@@ -30,9 +30,39 @@ namespace BetterAutoPlay
             DevLog.Initialize(Log);
             var harmony = new Harmony(PluginGuid);
             harmony.PatchAll(typeof(BetterAutoPlayPlugin).Assembly);
+            ModalTracker.TryPatchModals(harmony);
             IL2CPPChainloader.AddUnityComponent<AutoPlayVisualUpdater>();
             Log.LogInfo(PluginName + " loaded");
         }
+    }
+
+    internal static class ModalTracker
+    {
+        private static int s_openCount;
+        public static bool AnyOpen => s_openCount > 0;
+
+        public static void TryPatchModals(Harmony harmony)
+        {
+            try
+            {
+                var modalType = AccessTools.TypeByName("Nosebleed.Pancake.Modal.Modal");
+                if (modalType == null) { BetterAutoPlayPlugin.LogSource.LogWarning("[BAP] Modal type not found"); return; }
+
+                var opened = AccessTools.Method(modalType, "OnOpened")
+                    ?? AccessTools.Method(modalType, "OnModalOpened");
+                var closed = AccessTools.Method(modalType, "OnClosed")
+                    ?? AccessTools.Method(modalType, "OnModalClosed");
+                var postfixOpened = new HarmonyMethod(typeof(ModalTracker), nameof(OnOpened));
+                var postfixClosed = new HarmonyMethod(typeof(ModalTracker), nameof(OnClosed));
+                if (opened != null) harmony.Patch(opened, postfix: postfixOpened);
+                if (closed != null) harmony.Patch(closed, postfix: postfixClosed);
+                BetterAutoPlayPlugin.LogSource.LogInfo("[BAP] Modal patches applied");
+            }
+            catch (Exception ex) { BetterAutoPlayPlugin.LogSource.LogWarning("[BAP] Modal patch failed: " + ex.Message); }
+        }
+
+        public static void OnOpened() { s_openCount++; DevLog.Info("ModalTracker: opened, count=" + s_openCount); }
+        public static void OnClosed() { if (s_openCount > 0) s_openCount--; DevLog.Info("ModalTracker: closed, count=" + s_openCount); }
     }
 
     internal static class DevLog
@@ -126,6 +156,24 @@ namespace BetterAutoPlay
         private static bool s_labelOverridden;
         private static bool s_wasShowingAutoPlaying;
 
+        private static readonly MethodInfo s_autoPlayerStopMethod = AccessTools.Method(typeof(AutoPlayer), "StopAutoPlay");
+        private static readonly PropertyInfo s_handPileProp = AccessTools.Property(typeof(PlayerModel), "HandPile");
+        private static PropertyInfo s_cardPileProp;        // HandPileModel -> CardPileModel
+        private static PropertyInfo s_handCardsOnPileProp; // CardPileModel -> card list
+        private static bool s_handPileDiscoveryLogged;
+
+        // Order overlay
+        private static Button s_orderButton;
+        private static TMP_Text s_orderButtonLabel;
+        private static GameObject s_overlayPanel;
+        private static TMP_Text s_overlayContentText;
+        private static bool s_overlayOpen;
+        private static bool s_orderButtonCreated;
+        private static Button s_lastSeenPlayAllButton;
+        private static TMP_Text s_cachedPlayAllLabelForButton; // label cached per button instance
+        private static readonly System.Text.StringBuilder s_overlaySb = new System.Text.StringBuilder(512);
+        private static long s_lastHandFingerprint; // skip sort when hand unchanged
+
         public static void Tick()
         {
             if (DevLog.FullEnabled)
@@ -137,6 +185,8 @@ namespace BetterAutoPlay
             {
                 s_nextVisualRefreshAt = now + VisualRefreshIntervalSeconds;
                 Refresh(s_lastPlayer);
+                if (s_overlayOpen)
+                    UpdateOverlayContent();
             }
         }
 
@@ -157,20 +207,37 @@ namespace BetterAutoPlay
             s_lastPlayer = player;
 
             Button button = null;
-            TMP_Text label = null;
-            try
-            {
-                button = player.PlayAllButton;
-                if (button != null)
-                    label = button.GetComponentInChildren<TMP_Text>();
-            }
-            catch { }
+            try { button = player.PlayAllButton; } catch { }
 
-            if (button == null || label == null)
+            if (button == null)
             {
-                DevLog.Info("Refresh: PlayAll button or label is null, skipping visual update");
+                DevLog.Info("Refresh: PlayAll button is null, skipping visual update");
                 return;
             }
+
+            EnsureOrderButton(button);
+
+            // Re-resolve label only when the button instance changes.
+            TMP_Text label = s_cachedPlayAllLabelForButton;
+            if (s_lastSeenPlayAllButton != button || label == null)
+            {
+                try { label = button.GetComponentInChildren<TMP_Text>(); } catch { }
+                s_cachedPlayAllLabelForButton = label;
+            }
+
+            if (label == null)
+            {
+                DevLog.Info("Refresh: PlayAll label is null, skipping visual update");
+                return;
+            }
+
+            string wantedOrderLabel = s_overlayOpen ? "Close" : "Order";
+            if (s_orderButtonLabel != null && s_orderButtonLabel.text != wantedOrderLabel)
+                s_orderButtonLabel.text = wantedOrderLabel;
+
+            // Keep our button interactable; only write when it changed to avoid dirtying the canvas.
+            if (s_orderButton != null)
+                try { if (!s_orderButton.interactable) s_orderButton.interactable = true; } catch { }
 
             if (s_cachedPlayAllLabel != label)
             {
@@ -231,6 +298,18 @@ namespace BetterAutoPlay
 
         private static void TryResumePersistentAutoPlay()
         {
+            if (s_overlayOpen)
+            {
+                LogResumeSkip("order overlay is open");
+                return;
+            }
+
+            if (ModalTracker.AnyOpen)
+            {
+                LogResumeSkip("modal is open");
+                return;
+            }
+
             if (!s_persistentAutoPlayIntent)
             {
                 LogResumeSkip("persistent intent is off");
@@ -297,6 +376,328 @@ namespace BetterAutoPlay
                 player.AutoPlayer?.Play();
             }
             catch { }
+        }
+
+        private static void EnsureOrderButton(Button playAllButton)
+        {
+            if (playAllButton == null) return;
+
+            // If the PlayAll button changed (scene reload), tear down and rebuild.
+            if (s_orderButtonCreated && s_lastSeenPlayAllButton != playAllButton)
+            {
+                if (s_orderButton != null)
+                    try { GameObject.Destroy(s_orderButton.gameObject); } catch { }
+                if (s_overlayPanel != null)
+                    try { GameObject.Destroy(s_overlayPanel); } catch { }
+                s_orderButton = null;
+                s_orderButtonLabel = null;
+                s_overlayPanel = null;
+                s_overlayContentText = null;
+                s_overlayOpen = false;
+                s_orderButtonCreated = false;
+            }
+
+            if (s_orderButtonCreated) return;
+            s_orderButtonCreated = true;
+            s_lastSeenPlayAllButton = playAllButton;
+
+            try
+            {
+                var origRt = playAllButton.GetComponent<RectTransform>();
+
+                // Build button from scratch in the same parent so scale/depth are correct.
+                var orderGo = new GameObject("BAPOrderButton");
+                orderGo.transform.SetParent(playAllButton.transform.parent, false);
+                orderGo.transform.SetAsLastSibling();
+
+                var rt = orderGo.AddComponent<RectTransform>();
+                rt.anchorMin = new Vector2(0.5f, 0.5f);
+                rt.anchorMax = new Vector2(0.5f, 0.5f);
+                rt.pivot = new Vector2(0.5f, 0.5f);
+                float w = origRt != null ? origRt.sizeDelta.x : 128f;
+                float h = origRt != null ? origRt.sizeDelta.y : 64f;
+                rt.sizeDelta = new Vector2(w, h);
+                rt.anchoredPosition = new Vector2(-(w + 6f), 0f);
+
+                // Copy background image style from PlayAll button.
+                var srcImg = playAllButton.GetComponent<Image>();
+                var img = orderGo.AddComponent<Image>();
+                if (srcImg != null)
+                {
+                    img.sprite   = srcImg.sprite;
+                    img.material = srcImg.material;
+                    img.type     = srcImg.type;
+                    img.color    = srcImg.color;
+                }
+
+                s_orderButton = orderGo.AddComponent<Button>();
+                s_orderButton.targetGraphic = img;
+                if (srcImg != null)
+                {
+                    s_orderButton.transition = playAllButton.transition;
+                    s_orderButton.colors     = playAllButton.colors;
+                }
+                s_orderButton.onClick.AddListener(new System.Action(ToggleOverlay));
+
+                var textGo = new GameObject("Label");
+                textGo.transform.SetParent(orderGo.transform, false);
+                var textRt = textGo.AddComponent<RectTransform>();
+                textRt.anchorMin = Vector2.zero;
+                textRt.anchorMax = Vector2.one;
+                textRt.offsetMin = Vector2.zero;
+                textRt.offsetMax = Vector2.zero;
+                s_orderButtonLabel = textGo.AddComponent<TextMeshProUGUI>();
+                // Copy font/size from the PlayAll label.
+                var srcLabel = playAllButton.GetComponentInChildren<TMP_Text>();
+                if (srcLabel != null)
+                {
+                    s_orderButtonLabel.font      = srcLabel.font;
+                    s_orderButtonLabel.fontSize  = srcLabel.fontSize;
+                    s_orderButtonLabel.fontStyle = srcLabel.fontStyle;
+                }
+                s_orderButtonLabel.text      = "Order";
+                s_orderButtonLabel.alignment = TextAlignmentOptions.Center;
+                s_orderButtonLabel.color     = Color.white;
+
+                CreateOverlayPanel(playAllButton, h);
+            }
+            catch (Exception ex)
+            {
+                BetterAutoPlayPlugin.LogSource.LogWarning("EnsureOrderButton failed: " + ex.Message);
+            }
+        }
+
+        private static Transform FindCanvasTransform(Transform start)
+        {
+            Transform t = start;
+            while (t != null)
+            {
+                try
+                {
+                    var comps = t.GetComponents<Component>();
+                    if (comps != null)
+                        foreach (var c in comps)
+                            if (c != null && c.GetType().Name == "Canvas")
+                                return t;
+                }
+                catch { }
+                t = t.parent;
+            }
+            return start; // fallback: stay where we are
+        }
+
+        private static void CreateOverlayPanel(Button playAllButton, float buttonHeight)
+        {
+            var buttonParent = playAllButton.transform.parent;
+
+            var panelGo = new GameObject("BAPOrderPanel");
+            // Create in same parent first so local-space coordinates work correctly.
+            panelGo.transform.SetParent(buttonParent, false);
+
+            float panelH = 500f;
+            var rt = panelGo.AddComponent<RectTransform>();
+            rt.anchorMin = new Vector2(0.5f, 0.5f);
+            rt.anchorMax = new Vector2(0.5f, 0.5f);
+            rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.sizeDelta = new Vector2(380f, panelH);
+            rt.anchoredPosition = new Vector2(0f, buttonHeight * 0.5f + panelH * 0.5f + 8f);
+
+            // Lift to the Canvas (not the absolute root) as last sibling so it renders above everything.
+            Transform canvasTransform = FindCanvasTransform(buttonParent);
+            panelGo.transform.SetParent(canvasTransform, true);
+            panelGo.transform.SetAsLastSibling();
+
+            var bg = panelGo.AddComponent<Image>();
+            bg.color = new Color(0.04f, 0.04f, 0.10f, 0.94f);
+
+            // Title
+            var titleGo = new GameObject("Title");
+            titleGo.transform.SetParent(panelGo.transform, false);
+            var titleRt = titleGo.AddComponent<RectTransform>();
+            titleRt.anchorMin = new Vector2(0f, 1f);
+            titleRt.anchorMax = new Vector2(1f, 1f);
+            titleRt.pivot = new Vector2(0.5f, 1f);
+            titleRt.offsetMin = new Vector2(12f, -48f);
+            titleRt.offsetMax = new Vector2(-12f, -8f);
+            var titleText = titleGo.AddComponent<TextMeshProUGUI>();
+            titleText.text = "Play Order  <size=11><color=#888888>(autoplay paused)</color></size>";
+            titleText.fontSize = 17;
+            titleText.fontStyle = FontStyles.Bold;
+            titleText.alignment = TextAlignmentOptions.Center;
+            titleText.color = Color.white;
+
+            // Content
+            var contentGo = new GameObject("Content");
+            contentGo.transform.SetParent(panelGo.transform, false);
+            var contentRt = contentGo.AddComponent<RectTransform>();
+            contentRt.anchorMin = Vector2.zero;
+            contentRt.anchorMax = Vector2.one;
+            contentRt.offsetMin = new Vector2(14f, 12f);
+            contentRt.offsetMax = new Vector2(-14f, -56f);
+            var contentText = contentGo.AddComponent<TextMeshProUGUI>();
+            contentText.fontSize = 13f;
+            contentText.alignment = TextAlignmentOptions.TopLeft;
+            contentText.color = Color.white;
+            s_overlayContentText = contentText;
+
+            s_overlayPanel = panelGo;
+            panelGo.SetActive(false);
+        }
+
+        private static void ToggleOverlay()
+        {
+            s_overlayOpen = !s_overlayOpen;
+            DevLog.Info("ToggleOverlay: open=" + s_overlayOpen);
+
+            if (s_overlayOpen)
+            {
+                // Stop autoplay immediately.
+                try { s_autoPlayerStopMethod?.Invoke(s_lastPlayer?.AutoPlayer, null); } catch { }
+                s_lastHandFingerprint = 0; // force immediate refresh on open
+            }
+
+            if (s_overlayPanel != null)
+                s_overlayPanel.SetActive(s_overlayOpen);
+
+            if (s_orderButtonLabel != null)
+                s_orderButtonLabel.text = s_overlayOpen ? "Close" : "Order";
+
+            if (s_overlayOpen)
+                UpdateOverlayContent();
+        }
+
+        private static void TryLiveRefreshHand()
+        {
+            if (s_lastPlayer == null) return;
+            try
+            {
+                List<CardModel> hand = null;
+
+                // Path: player.HandPile (HandPileModel) -> .CardPile (CardPileModel) -> .[cards]
+                var handPile = s_handPileProp?.GetValue(s_lastPlayer);
+                if (handPile != null)
+                {
+                    // Step 1: find CardPile property on HandPileModel (cached after first find)
+                    if (s_cardPileProp == null)
+                    {
+                        var type = handPile.GetType();
+                        s_cardPileProp = type.GetProperty("CardPile");
+                        if (s_cardPileProp == null && !s_handPileDiscoveryLogged)
+                        {
+                            s_handPileDiscoveryLogged = true;
+                            foreach (var p in type.GetProperties())
+                                BetterAutoPlayPlugin.LogSource.LogInfo("[BAP] HandPileModel prop: " + p.Name + " -> " + p.PropertyType.Name);
+                        }
+                    }
+
+                    if (s_cardPileProp != null)
+                    {
+                        var cardPile = s_cardPileProp.GetValue(handPile);
+                        if (cardPile != null)
+                        {
+                            // Step 2: find card-list property on CardPileModel (cached after first find)
+                            if (s_handCardsOnPileProp == null)
+                            {
+                                var type = cardPile.GetType();
+                                foreach (var name in new[] { "Cards", "CardList", "Pile", "HandCards", "Items", "AllCards", "CardModels" })
+                                {
+                                    var p = type.GetProperty(name);
+                                    if (p != null) { s_handCardsOnPileProp = p; break; }
+                                }
+                                if (s_handCardsOnPileProp == null && !s_handPileDiscoveryLogged)
+                                {
+                                    s_handPileDiscoveryLogged = true;
+                                    foreach (var p in type.GetProperties())
+                                        BetterAutoPlayPlugin.LogSource.LogInfo("[BAP] CardPileModel prop: " + p.Name + " -> " + p.PropertyType.Name);
+                                }
+                            }
+
+                            if (s_handCardsOnPileProp != null)
+                            {
+                                var raw = s_handCardsOnPileProp.GetValue(cardPile);
+                                if (raw != null) hand = Il2CppListAdapter.ToManaged(raw);
+                            }
+                        }
+                    }
+                }
+
+                // Fallback to cached list from last SortCardsByCombo call.
+                if (hand == null || hand.Count == 0)
+                    hand = LiveHandCache.Get();
+
+                if (hand == null || hand.Count == 0) return;
+
+                // Skip the sort + allocation if the hand hasn't changed since last tick.
+                long fp = HandFingerprint(hand);
+                if (fp == s_lastHandFingerprint) return;
+                s_lastHandFingerprint = fp;
+
+                var sorted = ComboManaSorter.SortPreservePlayed(s_lastPlayer, hand);
+                SortOrderCache.LiveUpdate(sorted, s_lastPlayer);
+            }
+            catch { }
+        }
+
+        private static long HandFingerprint(List<CardModel> hand)
+        {
+            long fp = hand.Count;
+            for (int i = 0; i < hand.Count; i++)
+            {
+                var c = hand[i];
+                if (c == null) continue;
+                try { fp ^= c.Pointer.ToInt64() * (i + 1); } catch { }
+            }
+            return fp;
+        }
+
+        private static void UpdateOverlayContent()
+        {
+            if (s_overlayContentText == null) return;
+
+            TryLiveRefreshHand();
+            SortOrderCache.RefreshAffordability();
+
+            var entries = SortOrderCache.Entries;
+            if (entries.Count == 0)
+            {
+                s_overlayContentText.text = "<color=#666666>No sort data yet.\nTrigger autoplay once to populate.</color>";
+                return;
+            }
+
+            var sb = s_overlaySb;
+            sb.Clear();
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var e = entries[i];
+                if (e.Played)
+                {
+                    sb.Append("<color=#555555>").Append(i + 1).Append(".</color> ");
+                    sb.Append("<color=#44cc44>").Append(e.Name).Append("  Played</color>");
+                }
+                else
+                {
+                    string roleColor = RoleColor(e.Role);
+                    string nameColor = e.CanAfford ? "#ffffff" : "#ff5555";
+                    sb.Append("<color=#555555>").Append(i + 1).Append(".</color> ");
+                    sb.Append("<color=").Append(nameColor).Append(">").Append(e.Name).Append("</color>");
+                    sb.Append("  <color=").Append(roleColor).Append("><size=11>[").Append(e.Role).Append("]</size></color>");
+                    sb.Append("  <color=#777777><size=11>").Append(e.ManaCost).Append("mp</size></color>");
+                }
+                sb.AppendLine();
+            }
+            s_overlayContentText.text = sb.ToString();
+        }
+
+        private static string RoleColor(CardRole role)
+        {
+            switch (role)
+            {
+                case CardRole.ManaGenerator: return "#44aaff";
+                case CardRole.Utility:       return "#ffcc44";
+                case CardRole.Crawler:       return "#bb66ff";
+                case CardRole.Attack:        return "#ff4444";
+                default:                     return "#777777";
+            }
         }
 
         private static void LogResumeSkip(string reason)
@@ -426,6 +827,7 @@ namespace BetterAutoPlay
         {
             try
             {
+                LiveHandCache.Set(cards); // cache the live list for overlay updates
                 var player = PlayerProp == null ? null : PlayerProp.GetValue(__instance) as PlayerModel;
                 var original = Il2CppListAdapter.ToManaged(cards);
                 if (original.Count <= 1)
@@ -542,6 +944,7 @@ namespace BetterAutoPlay
             if (__result)
             {
                 AutoPlayRetryCooldown.Clear(cardModel);
+                if (isAutoPlay) SortOrderCache.MarkPlayed(cardModel);
                 DevLog.Info("TryPlayCard Postfix: SUCCESS card=" + DescribeCard(cardModel) + " -> cooldown cleared");
                 return;
             }
@@ -578,6 +981,106 @@ namespace BetterAutoPlay
         }
     }
 
+    internal static class LiveHandCache
+    {
+        private static object s_rawList;
+        public static void Set(object list) { s_rawList = list; }
+        public static List<CardModel> Get()
+        {
+            if (s_rawList == null) return null;
+            try { return Il2CppListAdapter.ToManaged(s_rawList); }
+            catch { return null; }
+        }
+    }
+
+    internal static class SortOrderCache
+    {
+        internal struct CardEntry
+        {
+            public string Name;
+            public CardRole Role;
+            public int ManaCost;
+            public bool CanAfford;
+            public bool Played;
+        }
+
+        public static readonly List<CardEntry> Entries = new List<CardEntry>();
+        private static readonly List<CardModel> s_cardRefs = new List<CardModel>();
+        private static readonly HashSet<long> s_playedPtrs = new HashSet<long>();
+        private static PlayerModel s_player;
+
+        public static void Update(List<CardModel> sorted, PlayerModel player)
+        {
+            s_player = player;
+            s_playedPtrs.Clear();
+            Rebuild(sorted, player);
+        }
+
+        public static void LiveUpdate(List<CardModel> sorted, PlayerModel player)
+        {
+            s_player = player;
+            // Preserve played tracking across live refresh.
+            Rebuild(sorted, player);
+        }
+
+        private static void Rebuild(List<CardModel> sorted, PlayerModel player)
+        {
+            Entries.Clear();
+            s_cardRefs.Clear();
+            foreach (var card in sorted)
+            {
+                if (card == null) continue;
+                s_cardRefs.Add(card);
+                var role = CardClassifier.Classify(card);
+                int mana = int.MaxValue;
+                try { mana = card.GetCardCostTypeManaCost(false); } catch { }
+                bool canAfford = true;
+                try { if (player != null) canAfford = player.CanAffordCard(card); } catch { }
+                long ptr = 0;
+                try { ptr = card.Pointer.ToInt64(); } catch { }
+                bool played = s_playedPtrs.Contains(ptr);
+                Entries.Add(new CardEntry { Name = card.Name ?? "?", Role = role, ManaCost = mana == int.MaxValue ? 0 : mana, CanAfford = canAfford, Played = played });
+            }
+        }
+
+        public static void RefreshAffordability()
+        {
+            if (s_player == null) return;
+            for (int i = 0; i < s_cardRefs.Count && i < Entries.Count; i++)
+            {
+                var card = s_cardRefs[i];
+                if (card == null) continue;
+                var e = Entries[i];
+                try { e.CanAfford = s_player.CanAffordCard(card); } catch { }
+                try { e.Played = s_playedPtrs.Contains(card.Pointer.ToInt64()); } catch { }
+                Entries[i] = e;
+            }
+        }
+
+        public static void MarkPlayed(CardModel card)
+        {
+            if (card == null) return;
+            try
+            {
+                long ptr = card.Pointer.ToInt64();
+                if (ptr == 0) return;
+                s_playedPtrs.Add(ptr);
+                for (int i = 0; i < s_cardRefs.Count; i++)
+                {
+                    var c = s_cardRefs[i];
+                    if (c != null && c.Pointer.ToInt64() == ptr)
+                    {
+                        var e = Entries[i];
+                        e.Played = true;
+                        Entries[i] = e;
+                        break;
+                    }
+                }
+            }
+            catch { }
+        }
+    }
+
     internal static class ComboManaSorter
     {
         private static readonly PropertyInfo s_gainAmountProp =
@@ -592,6 +1095,18 @@ namespace BetterAutoPlay
             AccessTools.Method(typeof(CardConfig), "GetManaCost", Type.EmptyTypes);
 
         public static List<CardModel> Sort(PlayerModel player, List<CardModel> input)
+        {
+            var ordered = SortCore(player, input);
+            SortOrderCache.Update(ordered, player);
+            return ordered;
+        }
+
+        public static List<CardModel> SortPreservePlayed(PlayerModel player, List<CardModel> input)
+        {
+            return SortCore(player, input); // caller handles LiveUpdate
+        }
+
+        private static List<CardModel> SortCore(PlayerModel player, List<CardModel> input)
         {
             var immediate = new List<CardModel>(input.Count);
             var deferred = new List<CardModel>(input.Count);
