@@ -1,12 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
 using BepInEx.Unity.IL2CPP.Utils;
 using HarmonyLib;
-using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using Nosebleed.Pancake.GameConfig;
 using Nosebleed.Pancake.Models;
 using TMPro;
@@ -27,10 +27,72 @@ namespace BetterAutoPlay
         public override void Load()
         {
             LogSource = Log;
+            DevLog.Initialize(Log);
             var harmony = new Harmony(PluginGuid);
             harmony.PatchAll(typeof(BetterAutoPlayPlugin).Assembly);
             IL2CPPChainloader.AddUnityComponent<AutoPlayVisualUpdater>();
             Log.LogInfo(PluginName + " loaded");
+        }
+    }
+
+    internal static class DevLog
+    {
+        private const string MarkerFileName = "betterautoplay.devlog";
+        private const string FullMarkerFileName = "betterautoplay.devlog.full";
+        private const string LogFileName = "betterautoplay.dev.log";
+        private static ManualLogSource s_log;
+        private static string s_logFilePath;
+        public static bool Enabled { get; private set; }
+        public static bool FullEnabled { get; private set; }
+
+        public static void Initialize(ManualLogSource log)
+        {
+            s_log = log;
+            try
+            {
+                string asmPath = typeof(BetterAutoPlayPlugin).Assembly.Location;
+                string dir = Path.GetDirectoryName(asmPath) ?? string.Empty;
+                string markerPath = Path.Combine(dir, MarkerFileName);
+                string fullMarkerPath = Path.Combine(dir, FullMarkerFileName);
+                s_logFilePath = Path.Combine(dir, LogFileName);
+                Enabled = File.Exists(markerPath);
+                FullEnabled = Enabled && File.Exists(fullMarkerPath);
+                if (Enabled)
+                {
+                    s_log.LogWarning("[DEVLOG] Enabled. Marker found: " + markerPath);
+                    if (FullEnabled)
+                        s_log.LogWarning("[DEVLOG] Full mode enabled. Marker found: " + fullMarkerPath);
+                    AppendToFile("=== DEVLOG START " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " ===");
+                }
+            }
+            catch (Exception ex)
+            {
+                Enabled = false;
+                s_log?.LogWarning("[DEVLOG] Initialization failed: " + ex.Message);
+            }
+        }
+
+        public static void Info(string message)
+        {
+            if (!Enabled || s_log == null)
+                return;
+            string line = "[DEVLOG] " + message;
+            s_log.LogInfo(line);
+            AppendToFile(DateTime.Now.ToString("HH:mm:ss.fff") + " " + line);
+        }
+
+        private static void AppendToFile(string line)
+        {
+            if (string.IsNullOrEmpty(s_logFilePath))
+                return;
+            try
+            {
+                File.AppendAllText(s_logFilePath, line + Environment.NewLine);
+            }
+            catch (Exception ex)
+            {
+                s_log?.LogWarning("[DEVLOG] File write failed: " + ex.Message);
+            }
         }
     }
 
@@ -46,282 +108,210 @@ namespace BetterAutoPlay
 
     internal static class AutoPlayUiController
     {
-        private const float IconRotationDegreesPerSecond = 180f;
         private const float RainbowHueCyclesPerSecond = 0.35f;
-        private const string LogoFileName = "autoplay_logo.png";
-        private const string LogoObjectName = "BetterAutoPlayLogo";
-
-        private static bool s_persistentAutoPlay;
-        private static float s_hue;
-
-        private static PlayerModel s_player;
-        private static Button s_button;
-        private static TMP_Text s_label;
-        private static Transform s_iconTransform;
-        private static Image s_iconImage;
-        private static Image s_logoImage;
-        private static Sprite s_logoSprite;
-        private static bool s_logoLoadAttempted;
-
-        private static string s_defaultLabelText;
-        private static Color s_defaultLabelColor = Color.white;
-        private static Vector3 s_defaultIconEuler;
-        private static Vector3 s_defaultLogoEuler;
-        private static bool s_defaultsCaptured;
-
-        public static void Bind(PlayerModel player)
-        {
-            if (player == null)
-                return;
-
-            s_player = player;
-            var button = player.PlayAllButton;
-            if (button == null)
-                return;
-
-            if (s_button != button)
-            {
-                s_button = button;
-                s_label = TryFindLabel(button);
-                s_iconImage = TryFindIconImage(button);
-                s_logoImage = TryAttachOrGetLogo(button);
-                s_iconTransform = s_logoImage != null
-                    ? s_logoImage.transform
-                    : (s_iconImage != null ? s_iconImage.transform : button.transform);
-                CaptureDefaults();
-            }
-
-            ApplyStaticVisuals();
-        }
-
-        public static void OnAutoPlayButtonClicked(PlayerModel player)
-        {
-            Bind(player);
-
-            if (s_persistentAutoPlay)
-            {
-                s_persistentAutoPlay = false;
-                try { player?.StopAutoPlay(); } catch { }
-            }
-            else
-            {
-                s_persistentAutoPlay = true;
-                TryStartAutoPlay(player);
-            }
-
-            ApplyStaticVisuals();
-        }
+        private const float VisualRefreshIntervalSeconds = 0.05f;
+        private const string AutoPlayLabel = "Auto Play";
+        private const string AutoPlayingLabel = "Auto-Playing";
+        private const float NoPlayableCardsBackoffSeconds = 0.5f;
+        private static bool s_persistentAutoPlayIntent;
+        private static PlayerModel s_lastPlayer;
+        private static float s_nextResumeAttemptAt;
+        private static float s_manualToggleCooldownUntil;
+        private static string s_lastResumeSkipReason;
+        private static float s_nextSkipRepeatLogAt;
+        private static float s_nextVisualRefreshAt;
+        private static TMP_Text s_cachedPlayAllLabel;
+        private static string s_defaultPlayAllLabelText;
+        private static Color s_defaultPlayAllLabelColor;
+        private static bool s_labelOverridden;
+        private static bool s_wasShowingAutoPlaying;
 
         public static void Tick()
         {
-            if (!s_persistentAutoPlay)
-                return;
+            if (DevLog.FullEnabled)
+                DevLog.Info("Tick() -> TryResumePersistentAutoPlay()");
+            TryResumePersistentAutoPlay();
 
-            var player = s_player;
+            float now = Time.realtimeSinceStartup;
+            if (now >= s_nextVisualRefreshAt)
+            {
+                s_nextVisualRefreshAt = now + VisualRefreshIntervalSeconds;
+                Refresh(s_lastPlayer);
+            }
+        }
+
+        public static void SyncPersistentToggle(PlayerModel player)
+        {
             if (player == null)
                 return;
 
+            s_persistentAutoPlayIntent = !s_persistentAutoPlayIntent;
+            s_manualToggleCooldownUntil = Time.realtimeSinceStartup + 0.4f;
+            DevLog.Info("SyncPersistentToggle: intent=" + s_persistentAutoPlayIntent + ", cooldownUntil=" + s_manualToggleCooldownUntil.ToString("F3"));
+        }
+
+        public static void Refresh(PlayerModel player)
+        {
+            if (player == null)
+                return;
+            s_lastPlayer = player;
+
+            Button button = null;
+            TMP_Text label = null;
             try
             {
-                if (player.AutoPlayer != null && !player.AutoPlayer.IsPlaying)
-                    player.AutoPlayer.Play();
+                button = player.PlayAllButton;
+                if (button != null)
+                    label = button.GetComponentInChildren<TMP_Text>();
             }
             catch { }
 
-            float dt = Time.unscaledDeltaTime;
-            if (dt <= 0f)
-                return;
-
-            if (s_iconTransform != null)
+            if (button == null || label == null)
             {
-                var euler = s_iconTransform.localEulerAngles;
-                euler.z -= IconRotationDegreesPerSecond * dt;
-                s_iconTransform.localEulerAngles = euler;
+                DevLog.Info("Refresh: PlayAll button or label is null, skipping visual update");
+                return;
             }
 
-            if (s_label != null)
+            if (s_cachedPlayAllLabel != label)
             {
-                s_hue += RainbowHueCyclesPerSecond * dt;
-                s_hue -= Mathf.Floor(s_hue);
-                var rainbow = Color.HSVToRGB(s_hue, 1f, 1f);
+                s_cachedPlayAllLabel = label;
+                s_defaultPlayAllLabelText = AutoPlayLabel;
+                s_defaultPlayAllLabelColor = label.color;
+                s_labelOverridden = false;
+            }
+
+            bool isPlaying = false;
+            try
+            {
+                isPlaying = player.AutoPlayer != null && player.AutoPlayer.IsPlaying;
+            }
+            catch { }
+            bool canActNow = false;
+            try { canActNow = button != null && button.interactable; }
+            catch { }
+
+            bool shouldShowAutoPlaying = canActNow && (isPlaying || s_persistentAutoPlayIntent);
+            if (shouldShowAutoPlaying)
+            {
+                if (!string.Equals(label.text, AutoPlayingLabel, StringComparison.Ordinal))
+                    label.text = AutoPlayingLabel;
+                float hue = Mathf.Repeat(Time.realtimeSinceStartup * RainbowHueCyclesPerSecond, 1f);
+                var rainbow = Color.HSVToRGB(hue, 1f, 1f);
                 rainbow.a = 1f;
-                s_label.color = rainbow;
+                if (label.color != rainbow)
+                    label.color = rainbow;
+                s_labelOverridden = true;
+                if (!s_wasShowingAutoPlaying)
+                {
+                    DevLog.Info("Refresh: entered Auto-Playing visual state");
+                    s_wasShowingAutoPlaying = true;
+                }
+            }
+            else if (s_labelOverridden)
+            {
+                label.text = s_defaultPlayAllLabelText;
+                label.color = s_defaultPlayAllLabelColor;
+                s_labelOverridden = false;
+                if (s_wasShowingAutoPlaying)
+                {
+                    DevLog.Info("Refresh: exited Auto-Playing visual state");
+                    s_wasShowingAutoPlaying = false;
+                }
+            }
+            else if (!string.Equals(label.text, AutoPlayLabel, StringComparison.Ordinal))
+            {
+                label.text = AutoPlayLabel;
+                if (s_wasShowingAutoPlaying)
+                {
+                    DevLog.Info("Refresh: exited Auto-Playing visual state");
+                    s_wasShowingAutoPlaying = false;
+                }
             }
         }
 
-        private static void TryStartAutoPlay(PlayerModel player)
+        private static void TryResumePersistentAutoPlay()
         {
+            if (!s_persistentAutoPlayIntent)
+            {
+                LogResumeSkip("persistent intent is off");
+                return;
+            }
+
+            if (Time.realtimeSinceStartup < s_manualToggleCooldownUntil)
+            {
+                LogResumeSkip("manual toggle cooldown active");
+                return;
+            }
+
+            if (Time.realtimeSinceStartup < s_nextResumeAttemptAt)
+            {
+                if (DevLog.FullEnabled)
+                    LogResumeSkip("resume interval cooldown active");
+                return;
+            }
+            s_nextResumeAttemptAt = Time.realtimeSinceStartup + 0.12f;
+
+            var player = s_lastPlayer;
+            if (player == null)
+            {
+                LogResumeSkip("last player is null");
+                return;
+            }
+
+            bool isPlaying = false;
+            try { isPlaying = player.AutoPlayer != null && player.AutoPlayer.IsPlaying; }
+            catch { }
+            if (isPlaying)
+            {
+                LogResumeSkip("autoplay already playing");
+                return;
+            }
+
+            bool canPlayNow = false;
             try
             {
-                if (player?.AutoPlayer != null && !player.AutoPlayer.IsPlaying)
-                    player.AutoPlayer.Play();
+                var button = player.PlayAllButton;
+                canPlayNow = button != null && button.interactable;
+            }
+            catch { }
+            if (!canPlayNow)
+            {
+                LogResumeSkip("PlayAll button not interactable");
+                return;
+            }
+
+            bool hasPlayableCardsNow = true;
+            try { hasPlayableCardsNow = player.CanPlayerKeepPlaying(); }
+            catch { }
+            if (!hasPlayableCardsNow)
+            {
+                s_nextResumeAttemptAt = Time.realtimeSinceStartup + NoPlayableCardsBackoffSeconds;
+                LogResumeSkip("no playable cards right now");
+                return;
+            }
+
+            try
+            {
+                s_lastResumeSkipReason = null;
+                DevLog.Info("TryResume: calling AutoPlayer.Play()");
+                player.AutoPlayer?.Play();
             }
             catch { }
         }
 
-        private static void CaptureDefaults()
+        private static void LogResumeSkip(string reason)
         {
-            s_defaultsCaptured = true;
-            s_defaultLabelText = s_label != null ? s_label.text : null;
-            s_defaultLabelColor = s_label != null ? s_label.color : Color.white;
-            s_defaultIconEuler = s_iconTransform != null ? s_iconTransform.localEulerAngles : Vector3.zero;
-            s_defaultLogoEuler = s_logoImage != null ? s_logoImage.transform.localEulerAngles : Vector3.zero;
-        }
-
-        private static void ApplyStaticVisuals()
-        {
-            if (!s_defaultsCaptured)
+            float now = Time.realtimeSinceStartup;
+            bool reasonChanged = !string.Equals(s_lastResumeSkipReason, reason, StringComparison.Ordinal);
+            bool repeatWindowPassed = now >= s_nextSkipRepeatLogAt;
+            if (!reasonChanged && !repeatWindowPassed)
                 return;
 
-            if (s_persistentAutoPlay)
-            {
-                if (s_label != null)
-                    s_label.text = "Auto-playing";
-
-                if (s_logoImage != null)
-                    s_logoImage.gameObject.SetActive(true);
-            }
-            else
-            {
-                if (s_label != null)
-                {
-                    s_label.text = s_defaultLabelText;
-                    s_label.color = s_defaultLabelColor;
-                }
-
-                if (s_iconTransform != null)
-                    s_iconTransform.localEulerAngles = s_defaultIconEuler;
-
-                if (s_logoImage != null)
-                {
-                    s_logoImage.transform.localEulerAngles = s_defaultLogoEuler;
-                    s_logoImage.gameObject.SetActive(false);
-                }
-            }
+            s_lastResumeSkipReason = reason;
+            s_nextSkipRepeatLogAt = now + 2f;
+            DevLog.Info("TryResume: skipped, " + reason);
         }
 
-        private static TMP_Text TryFindLabel(Button button)
-        {
-            if (button == null) return null;
-            try { return button.GetComponentInChildren<TMP_Text>(); }
-            catch { return null; }
-        }
-
-        private static Image TryFindIconImage(Button button)
-        {
-            if (button == null) return null;
-
-            try
-            {
-                var byName = button.transform.Find("Icon");
-                if (byName != null)
-                {
-                    var namedImage = byName.GetComponent<Image>();
-                    if (namedImage != null)
-                        return namedImage;
-                }
-            }
-            catch { }
-
-            try
-            {
-                var direct = button.image;
-                if (direct != null)
-                    return direct;
-            }
-            catch { }
-
-            try { return button.GetComponentInChildren<Image>(); }
-            catch { return null; }
-        }
-
-        private static Image TryAttachOrGetLogo(Button button)
-        {
-            if (button == null)
-                return null;
-
-            var existing = button.transform.Find(LogoObjectName);
-            if (existing != null)
-            {
-                try { return existing.GetComponent<Image>(); }
-                catch { return null; }
-            }
-
-            var sprite = GetOrLoadLogoSprite();
-            if (sprite == null)
-                return null;
-
-            try
-            {
-                var go = new GameObject(LogoObjectName);
-                go.transform.SetParent(button.transform, false);
-
-                var image = go.AddComponent<Image>();
-                image.sprite = sprite;
-                image.raycastTarget = false;
-                image.preserveAspect = true;
-
-                var rt = go.GetComponent<RectTransform>();
-                rt.anchorMin = new Vector2(0.5f, 0.5f);
-                rt.anchorMax = new Vector2(0.5f, 0.5f);
-                rt.pivot = new Vector2(0.5f, 0.5f);
-                rt.anchoredPosition = Vector2.zero;
-                rt.sizeDelta = new Vector2(20f, 20f);
-
-                go.SetActive(false);
-                return image;
-            }
-            catch (Exception ex)
-            {
-                BetterAutoPlayPlugin.LogSource?.LogWarning("Could not create autoplay logo overlay: " + ex.Message);
-                return null;
-            }
-        }
-
-        private static Sprite GetOrLoadLogoSprite()
-        {
-            if (s_logoSprite != null)
-                return s_logoSprite;
-            if (s_logoLoadAttempted)
-                return null;
-
-            s_logoLoadAttempted = true;
-            var path = System.IO.Path.Combine(Paths.PluginPath, "BetterAutoPlay", LogoFileName);
-            if (!System.IO.File.Exists(path))
-            {
-                BetterAutoPlayPlugin.LogSource?.LogInfo("Autoplay logo not found at: " + path);
-                return null;
-            }
-
-            try
-            {
-                var bytes = System.IO.File.ReadAllBytes(path);
-                var texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                var il2cppBytes = new Il2CppStructArray<byte>(bytes.Length);
-                for (int i = 0; i < bytes.Length; i++)
-                    il2cppBytes[i] = bytes[i];
-
-                if (!ImageConversion.LoadImage(texture, il2cppBytes, false))
-                {
-                    BetterAutoPlayPlugin.LogSource?.LogWarning("Failed to decode autoplay logo PNG: " + path);
-                    return null;
-                }
-
-                texture.wrapMode = TextureWrapMode.Clamp;
-                texture.filterMode = FilterMode.Bilinear;
-                s_logoSprite = Sprite.Create(
-                    texture,
-                    new Rect(0f, 0f, texture.width, texture.height),
-                    new Vector2(0.5f, 0.5f),
-                    100f);
-                return s_logoSprite;
-            }
-            catch (Exception ex)
-            {
-                BetterAutoPlayPlugin.LogSource?.LogWarning("Could not load autoplay logo: " + ex.Message);
-                return null;
-            }
-        }
     }
 
     // Lower value = played earlier.
@@ -338,6 +328,8 @@ namespace BetterAutoPlay
             AccessTools.Property(typeof(CardConfig), "cardGroup");
         private static readonly PropertyInfo s_isWeaponProp =
             AccessTools.Property(typeof(CardGroup), "IsWeapon");
+        private static readonly PropertyInfo s_onPlayEffectsProp =
+            AccessTools.Property(typeof(CardConfig), "OnPlayEffects");
 
         public static CardRole Classify(CardModel card)
         {
@@ -371,13 +363,13 @@ namespace BetterAutoPlay
         {
             try
             {
-                var effectsProp = AccessTools.Property(typeof(CardConfig), "OnPlayEffects");
-                var effects = effectsProp?.GetValue(config);
+                var effects = s_onPlayEffectsProp?.GetValue(config);
                 if (effects == null) return false;
 
-                var type = effects.GetType();
-                var countProp = type.GetProperty("Count") ?? type.GetProperty("Length");
-                var getItem = type.GetMethod("get_Item");
+                PropertyInfo countProp;
+                MethodInfo getItem;
+                if (!ReflectionCache.TryGetListAccessors(effects.GetType(), out countProp, out getItem))
+                    return false;
                 if (countProp == null || getItem == null) return false;
 
                 int count = Convert.ToInt32(countProp.GetValue(effects));
@@ -456,7 +448,7 @@ namespace BetterAutoPlay
     {
         private static void Postfix(PlayerModel __instance)
         {
-            try { AutoPlayUiController.Bind(__instance); }
+            try { AutoPlayUiController.Refresh(__instance); }
             catch { }
         }
     }
@@ -464,10 +456,125 @@ namespace BetterAutoPlay
     [HarmonyPatch(typeof(PlayerModel), "Button_AutoPlay")]
     internal static class PlayerModelButtonAutoPlayPatch
     {
-        private static bool Prefix(PlayerModel __instance)
+        private static void Postfix(PlayerModel __instance)
         {
-            AutoPlayUiController.OnAutoPlayButtonClicked(__instance);
-            return false;
+            try { AutoPlayUiController.SyncPersistentToggle(__instance); }
+            catch { }
+            try { AutoPlayUiController.Refresh(__instance); }
+            catch { }
+        }
+    }
+
+    internal static class AutoPlayRetryCooldown
+    {
+        private const float RetryDelaySeconds = 0.5f;
+        private static readonly Dictionary<long, float> s_retryReadyAtByCardPtr = new Dictionary<long, float>();
+
+        public static bool IsCoolingDown(CardModel cardModel)
+        {
+            long key = GetCardKey(cardModel);
+            if (key == 0)
+                return false;
+
+            float readyAt;
+            if (!s_retryReadyAtByCardPtr.TryGetValue(key, out readyAt))
+                return false;
+
+            if (Time.realtimeSinceStartup >= readyAt)
+            {
+                s_retryReadyAtByCardPtr.Remove(key);
+                return false;
+            }
+
+            return true;
+        }
+
+        public static void MarkFailed(CardModel cardModel)
+        {
+            long key = GetCardKey(cardModel);
+            if (key == 0)
+                return;
+            s_retryReadyAtByCardPtr[key] = Time.realtimeSinceStartup + RetryDelaySeconds;
+        }
+
+        public static void Clear(CardModel cardModel)
+        {
+            long key = GetCardKey(cardModel);
+            if (key == 0)
+                return;
+            s_retryReadyAtByCardPtr.Remove(key);
+        }
+
+        private static long GetCardKey(CardModel cardModel)
+        {
+            try
+            {
+                if (cardModel == null || cardModel.Pointer == IntPtr.Zero)
+                    return 0;
+                return cardModel.Pointer.ToInt64();
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(PlayerModel), "TryPlayCard")]
+    internal static class PlayerModelTryPlayCardPatch
+    {
+        private static void Prefix(PlayerModel __instance, CardModel cardModel, bool isAutoPlay, out bool __state)
+        {
+            __state = false;
+            if (!isAutoPlay)
+                return;
+
+            try { __state = __instance != null && cardModel != null && !__instance.CanAffordCard(cardModel); }
+            catch { __state = false; }
+            DevLog.Info("TryPlayCard Prefix: card=" + DescribeCard(cardModel) + ", isAutoPlay=true, cannotAffordBefore=" + __state);
+        }
+
+        private static void Postfix(PlayerModel __instance, CardModel cardModel, bool isAutoPlay, bool __result, bool __state)
+        {
+            if (!isAutoPlay)
+                return;
+
+            if (__result)
+            {
+                AutoPlayRetryCooldown.Clear(cardModel);
+                DevLog.Info("TryPlayCard Postfix: SUCCESS card=" + DescribeCard(cardModel) + " -> cooldown cleared");
+                return;
+            }
+
+            bool cannotAffordAfter = false;
+            try { cannotAffordAfter = __instance != null && cardModel != null && !__instance.CanAffordCard(cardModel); }
+            catch { cannotAffordAfter = false; }
+
+            if (__state || cannotAffordAfter)
+            {
+                AutoPlayRetryCooldown.MarkFailed(cardModel);
+                DevLog.Info("TryPlayCard Postfix: FAIL card=" + DescribeCard(cardModel) + ", cannotAffordBefore=" + __state + ", cannotAffordAfter=" + cannotAffordAfter + " -> cooldown marked");
+            }
+            else
+            {
+                DevLog.Info("TryPlayCard Postfix: FAIL card=" + DescribeCard(cardModel) + ", non-mana failure -> no cooldown");
+            }
+        }
+
+        private static string DescribeCard(CardModel cardModel)
+        {
+            if (cardModel == null)
+                return "<null>";
+            try
+            {
+                string name = cardModel.Name ?? "?";
+                long ptr = cardModel.Pointer.ToInt64();
+                return name + "@" + ptr;
+            }
+            catch
+            {
+                return "<card-ex>";
+            }
         }
     }
 
@@ -475,42 +582,82 @@ namespace BetterAutoPlay
     {
         private static readonly PropertyInfo s_gainAmountProp =
             AccessTools.Property(typeof(Nosebleed.Pancake.GameCommands.GainManaEffect), "_gainAmount");
+        private static readonly PropertyInfo s_onPlayEffectsProp =
+            AccessTools.Property(typeof(CardConfig), "OnPlayEffects");
+        private static readonly MethodInfo s_isCardFreeToPlayMethod =
+            AccessTools.Method(typeof(CardModel), "IsCardFreeToPlay", Type.EmptyTypes);
+        private static readonly MethodInfo s_playerIsCardInComboMethod =
+            AccessTools.Method(typeof(PlayerModel), "IsCardInCombo", new[] { typeof(ICardModel), typeof(bool) });
+        private static readonly MethodInfo s_cardConfigGetManaCostMethod =
+            AccessTools.Method(typeof(CardConfig), "GetManaCost", Type.EmptyTypes);
 
         public static List<CardModel> Sort(PlayerModel player, List<CardModel> input)
         {
-            var remaining = new List<CardModel>(input);
-            var originalIndex = BuildOriginalIndex(input);
-            var roles = BuildRoles(input);
-            var manaGains = BuildManaGains(input, roles);
-            var ordered = new List<CardModel>(input.Count);
+            var immediate = new List<CardModel>(input.Count);
+            var deferred = new List<CardModel>(input.Count);
+            RetryPolicy.PartitionByImmediatePlayability(player, input, immediate, deferred);
+            DevLog.Info("Sort: input=" + input.Count + ", immediate=" + immediate.Count + ", deferred=" + deferred.Count);
 
-            CardModel start = PickStartingCard(player, remaining, originalIndex, roles, manaGains);
+            var ordered = SortSubset(player, immediate, BuildContext(player, immediate));
+
+            if (deferred.Count > 0)
+            {
+                var deferredOrdered = SortSubset(player, deferred, BuildContext(player, deferred));
+                ordered.AddRange(deferredOrdered);
+            }
+            return ordered;
+        }
+
+        private static List<CardModel> SortSubset(PlayerModel player, List<CardModel> subset, AutoPlaySortContext context)
+        {
+            var remaining = new List<CardModel>(subset);
+            var ordered = new List<CardModel>(subset.Count);
+
+            CardModel start = PickStartingCard(player, remaining, context);
             if (start == null)
             {
-                AppendRoleSorted(ordered, remaining, originalIndex, roles, manaGains);
+                DevLog.Info("SortSubset: no combo start found, using fallback role sort for all cards");
+                AppendRoleSorted(ordered, remaining, context);
                 return ordered;
             }
 
+            DevLog.Info("SortSubset: start=" + SafeName(start));
             ordered.Add(start);
             remaining.Remove(start);
 
             CardModel previous = start;
-            int previousMana = GetManaCost(start);
+            int previousMana = GetManaCost(start, context);
 
             while (remaining.Count > 0)
             {
-                CardModel next = PickNextComboCard(remaining, previous, previousMana, originalIndex, roles, manaGains);
+                CardModel next = PickNextComboCard(remaining, previous, previousMana, context);
                 if (next == null)
+                {
+                    DevLog.Info("SortSubset: combo chain ended, appending leftovers");
                     break;
+                }
 
+                DevLog.Info("SortSubset: next=" + SafeName(next) + ", previous=" + SafeName(previous) + ", previousMana=" + previousMana);
                 ordered.Add(next);
                 remaining.Remove(next);
                 previous = next;
-                previousMana = GetManaCost(next);
+                previousMana = GetManaCost(next, context);
             }
 
-            AppendRoleSorted(ordered, remaining, originalIndex, roles, manaGains);
+            AppendRoleSorted(ordered, remaining, context);
             return ordered;
+        }
+
+        private static AutoPlaySortContext BuildContext(PlayerModel player, List<CardModel> subset)
+        {
+            var originalIndex = BuildOriginalIndex(subset);
+            var roles = BuildRoles(subset);
+            var manaGains = BuildManaGains(subset, roles);
+            var manaCosts = BuildManaCosts(subset);
+            var comboCosts = BuildComboCosts(subset);
+            var evolved = BuildEvolvedFlags(subset);
+            var inComboNow = BuildInComboFlags(player, subset);
+            return new AutoPlaySortContext(originalIndex, roles, manaGains, manaCosts, comboCosts, evolved, inComboNow);
         }
 
         private static Dictionary<CardModel, CardRole> BuildRoles(List<CardModel> input)
@@ -538,7 +685,7 @@ namespace BetterAutoPlay
                     continue;
                 CardRole role;
                 int gain = (roles.TryGetValue(card, out role) && role == CardRole.ManaGenerator)
-                    ? ComputeManaGain(card)
+                    ? ComputeManaGain(card, ComputeRawManaCost)
                     : 0;
                 gains[card] = gain;
                 if (gain > 0)
@@ -549,17 +696,17 @@ namespace BetterAutoPlay
         }
 
         // Sum all mana-gain effects on a card's on-play list.
-        private static int ComputeManaGain(CardModel card)
+        private static int ComputeManaGain(CardModel card, Func<CardModel, int> getManaCost)
         {
             try
             {
-                var effectsProp = AccessTools.Property(typeof(Nosebleed.Pancake.GameConfig.CardConfig), "OnPlayEffects");
-                var effects = effectsProp?.GetValue(card.CardConfig);
+                var effects = s_onPlayEffectsProp?.GetValue(card.CardConfig);
                 if (effects == null) return 0;
 
-                var type = effects.GetType();
-                var countProp = type.GetProperty("Count") ?? type.GetProperty("Length");
-                var getItem = type.GetMethod("get_Item");
+                PropertyInfo countProp;
+                MethodInfo getItem;
+                if (!ReflectionCache.TryGetListAccessors(effects.GetType(), out countProp, out getItem))
+                    return 0;
                 if (countProp == null || getItem == null) return 0;
 
                 int total = 0;
@@ -572,7 +719,7 @@ namespace BetterAutoPlay
                     if (name == "GainManaEffect" && s_gainAmountProp != null)
                         total += Convert.ToInt32(s_gainAmountProp.GetValue(effect));
                     else if (name == "GainManaEqualToCostEffect")
-                        total += GetManaCost(card);
+                        total += getManaCost(card);
                 }
                 return total;
             }
@@ -581,9 +728,7 @@ namespace BetterAutoPlay
 
         // Pick the starting card: prefer whatever is currently continuing an existing combo,
         // then fall back to the best role+mana card overall.
-        private static CardModel PickStartingCard(PlayerModel player, List<CardModel> cards,
-            Dictionary<CardModel, int> originalIndex, Dictionary<CardModel, CardRole> roles,
-            Dictionary<CardModel, int> manaGains)
+        private static CardModel PickStartingCard(PlayerModel player, List<CardModel> cards, AutoPlaySortContext context)
         {
             CardModel bestInCombo = null;
             CardModel bestAny = null;
@@ -591,9 +736,9 @@ namespace BetterAutoPlay
             foreach (var card in cards)
             {
                 if (card == null) continue;
-                if (IsCurrentlyInCombo(player, card))
-                    bestInCombo = BetterCard(bestInCombo, card, originalIndex, roles, manaGains);
-                bestAny = BetterCard(bestAny, card, originalIndex, roles, manaGains);
+                if (IsCurrentlyInCombo(player, card, context))
+                    bestInCombo = BetterCard(bestInCombo, card, context);
+                bestAny = BetterCard(bestAny, card, context);
             }
 
             return bestInCombo ?? bestAny;
@@ -605,9 +750,7 @@ namespace BetterAutoPlay
         //   Tier 3 — Non-generators that stay flat (same cost, last resort before decreasing).
         //   Tier 4 — Anything with decreasing cost (final fallback).
         // This prevents 0,0,0,0→1 chains by always pairing a 0-cost play with a 1-cost follow-up.
-        private static CardModel PickNextComboCard(List<CardModel> cards, CardModel previous,
-            int previousMana, Dictionary<CardModel, int> originalIndex, Dictionary<CardModel, CardRole> roles,
-            Dictionary<CardModel, int> manaGains)
+        private static CardModel PickNextComboCard(List<CardModel> cards, CardModel previous, int previousMana, AutoPlaySortContext context)
         {
             CardModel bestManaGen = null;
             CardModel bestStrictIncrease = null;
@@ -619,17 +762,17 @@ namespace BetterAutoPlay
                 if (card == null || !CanComboAfter(card, previous))
                     continue;
 
-                int mana = GetManaCost(card);
-                CardRole role = GetRole(card, roles);
+                int mana = GetManaCost(card, context);
+                CardRole role = GetRole(card, context);
 
                 if (role == CardRole.ManaGenerator)
-                    bestManaGen = BetterCard(bestManaGen, card, originalIndex, roles, manaGains);
+                    bestManaGen = BetterCard(bestManaGen, card, context);
                 else if (mana > previousMana)
-                    bestStrictIncrease = BetterCard(bestStrictIncrease, card, originalIndex, roles, manaGains);
+                    bestStrictIncrease = BetterCard(bestStrictIncrease, card, context);
                 else if (mana == previousMana)
-                    bestFlatNonGen = BetterCard(bestFlatNonGen, card, originalIndex, roles, manaGains);
+                    bestFlatNonGen = BetterCard(bestFlatNonGen, card, context);
                 else
-                    bestDecreasing = BetterCard(bestDecreasing, card, originalIndex, roles, manaGains);
+                    bestDecreasing = BetterCard(bestDecreasing, card, context);
             }
 
             // When currently below zero mana-cost, prioritize climbing the combo ladder first.
@@ -642,112 +785,115 @@ namespace BetterAutoPlay
 
         // Sort leftover (non-combo) cards: role first, then mana gain (desc for generators),
         // then mana cost, then combo cost, then original order.
-        private static void AppendRoleSorted(List<CardModel> ordered, List<CardModel> remaining,
-            Dictionary<CardModel, int> originalIndex, Dictionary<CardModel, CardRole> roles,
-            Dictionary<CardModel, int> manaGains)
+        private static void AppendRoleSorted(List<CardModel> ordered, List<CardModel> remaining, AutoPlaySortContext context)
         {
             remaining.Sort(delegate(CardModel left, CardModel right)
             {
-                int r = GetRole(left, roles).CompareTo(GetRole(right, roles));
+                CardRole leftRole = GetRole(left, context);
+                CardRole rightRole = GetRole(right, context);
+                int r = leftRole.CompareTo(rightRole);
                 if (r != 0) return r;
+
                 // For mana generators: higher gain plays first (descending)
-                if (GetRole(left, roles) == CardRole.ManaGenerator)
+                if (leftRole == CardRole.ManaGenerator)
                 {
-                    r = GetManaGain(right, manaGains).CompareTo(GetManaGain(left, manaGains));
+                    r = GetManaGain(right, context).CompareTo(GetManaGain(left, context));
                     if (r != 0) return r;
                 }
-                r = GetManaCost(left).CompareTo(GetManaCost(right));
+
+                r = GetManaCost(left, context).CompareTo(GetManaCost(right, context));
                 if (r != 0) return r;
+
                 // Same mana: evolved cards play before non-evolved.
-                bool le = IsEvolved(left);
-                bool re2 = IsEvolved(right);
+                bool le = IsEvolved(left, context);
+                bool re2 = IsEvolved(right, context);
                 if (le && !re2) return -1;
                 if (!le && re2) return 1;
-                r = GetComboCost(left).CompareTo(GetComboCost(right));
+
+                r = GetComboCost(left, context).CompareTo(GetComboCost(right, context));
                 if (r != 0) return r;
-                return GetOriginalIndex(originalIndex, left).CompareTo(GetOriginalIndex(originalIndex, right));
+
+                return GetOriginalIndex(context, left).CompareTo(GetOriginalIndex(context, right));
             });
             ordered.AddRange(remaining);
         }
 
         // Role-first comparison; for ManaGenerator ties, prefer higher gain; otherwise lowest mana.
-        private static CardModel BetterCard(CardModel current, CardModel candidate,
-            Dictionary<CardModel, int> originalIndex, Dictionary<CardModel, CardRole> roles,
-            Dictionary<CardModel, int> manaGains)
+        private static CardModel BetterCard(CardModel current, CardModel candidate, AutoPlaySortContext context)
         {
             if (current == null) return candidate;
 
             // Prefer negative mana cards over non-negative cards to preserve
             // valid negative->zero combo openings.
-            int candidateMana = GetManaCost(candidate);
-            int currentMana = GetManaCost(current);
+            int candidateMana = GetManaCost(candidate, context);
+            int currentMana = GetManaCost(current, context);
             bool candidateNegative = candidateMana < 0;
             bool currentNegative = currentMana < 0;
             if (candidateNegative != currentNegative)
                 return candidateNegative ? candidate : current;
 
-            int r = GetRole(candidate, roles).CompareTo(GetRole(current, roles));
+            CardRole candidateRole = GetRole(candidate, context);
+            CardRole currentRole = GetRole(current, context);
+            int r = candidateRole.CompareTo(currentRole);
             if (r < 0) return candidate;
             if (r > 0) return current;
 
             // Same role: ManaGenerators prefer higher gain (more mana = play first)
-            if (GetRole(candidate, roles) == CardRole.ManaGenerator)
+            if (candidateRole == CardRole.ManaGenerator)
             {
-                r = GetManaGain(candidate, manaGains).CompareTo(GetManaGain(current, manaGains));
+                r = GetManaGain(candidate, context).CompareTo(GetManaGain(current, context));
                 if (r > 0) return candidate; // candidate gives more mana
                 if (r < 0) return current;
             }
 
-            return BetterLowestMana(current, candidate, originalIndex);
+            return BetterLowestMana(current, candidate, context);
         }
 
-        private static int GetManaGain(CardModel card, Dictionary<CardModel, int> manaGains)
+        private static int GetManaGain(CardModel card, AutoPlaySortContext context)
         {
             int gain;
-            return card != null && manaGains.TryGetValue(card, out gain) ? gain : 0;
+            return card != null && context.ManaGains.TryGetValue(card, out gain) ? gain : 0;
         }
 
-        private static CardModel BetterLowestMana(CardModel current, CardModel candidate,
-            Dictionary<CardModel, int> originalIndex)
+        private static CardModel BetterLowestMana(CardModel current, CardModel candidate, AutoPlaySortContext context)
         {
             if (current == null) return candidate;
 
-            int r = GetManaCost(candidate).CompareTo(GetManaCost(current));
+            int r = GetManaCost(candidate, context).CompareTo(GetManaCost(current, context));
             if (r < 0) return candidate;
             if (r > 0) return current;
 
             // Same mana: evolved cards play before non-evolved.
-            bool ce = IsEvolved(candidate);
-            bool cu = IsEvolved(current);
+            bool ce = IsEvolved(candidate, context);
+            bool cu = IsEvolved(current, context);
             if (ce && !cu) return candidate;
             if (!ce && cu) return current;
 
-            r = GetComboCost(candidate).CompareTo(GetComboCost(current));
+            r = GetComboCost(candidate, context).CompareTo(GetComboCost(current, context));
             if (r < 0) return candidate;
             if (r > 0) return current;
 
-            return GetOriginalIndex(originalIndex, candidate) < GetOriginalIndex(originalIndex, current)
+            return GetOriginalIndex(context, candidate) < GetOriginalIndex(context, current)
                 ? candidate : current;
         }
 
-        private static bool IsEvolved(CardModel card)
+        private static bool IsEvolved(CardModel card, AutoPlaySortContext context)
         {
-            try { return card != null && card.IsEvolved; }
-            catch { return false; }
+            bool value;
+            return card != null && context.Evolved.TryGetValue(card, out value) && value;
         }
 
-        private static CardRole GetRole(CardModel card, Dictionary<CardModel, CardRole> roles)
+        private static CardRole GetRole(CardModel card, AutoPlaySortContext context)
         {
             if (card == null) return CardRole.Unknown;
             CardRole role;
-            return roles.TryGetValue(card, out role) ? role : CardRole.Unknown;
+            return context.Roles.TryGetValue(card, out role) ? role : CardRole.Unknown;
         }
 
-        private static bool IsCurrentlyInCombo(PlayerModel player, CardModel card)
+        private static bool IsCurrentlyInCombo(PlayerModel player, CardModel card, AutoPlaySortContext context)
         {
-            if (player == null || card == null) return false;
-            try { return player.IsCardInCombo(card, true); }
-            catch { return false; }
+            bool value;
+            return card != null && context.InComboNow.TryGetValue(card, out value) && value;
         }
 
         private static bool CanComboAfter(CardModel card, CardModel previous)
@@ -757,18 +903,139 @@ namespace BetterAutoPlay
             catch { return false; }
         }
 
-        private static int GetManaCost(CardModel card)
+        private static int GetManaCost(CardModel card, AutoPlaySortContext context)
+        {
+            int cost;
+            return card != null && context.ManaCosts.TryGetValue(card, out cost) ? cost : int.MaxValue;
+        }
+
+        private static int ComputeRawManaCost(CardModel card)
         {
             if (card == null) return int.MaxValue;
+
+            // Free-to-play cards should still participate in combo ladder based on base mana.
+            int baseMana = GetBaseManaCostIfFree(card);
+            if (baseMana != int.MaxValue)
+                return baseMana;
+
             try { return card.GetCardCostTypeManaCost(false); }
             catch { return int.MaxValue; }
         }
 
-        private static int GetComboCost(CardModel card)
+        private static int GetBaseManaCostIfFree(CardModel card)
+        {
+            if (!IsCardFreeToPlay(card))
+                return int.MaxValue;
+
+            try
+            {
+                var config = card?.CardConfig;
+                if (config == null || s_cardConfigGetManaCostMethod == null)
+                    return int.MaxValue;
+
+                return Convert.ToInt32(s_cardConfigGetManaCostMethod.Invoke(config, null));
+            }
+            catch
+            {
+                return int.MaxValue;
+            }
+        }
+
+        private static bool IsCardFreeToPlay(CardModel card)
+        {
+            if (card == null)
+                return false;
+
+            try
+            {
+                if (s_isCardFreeToPlayMethod != null)
+                    return Convert.ToBoolean(s_isCardFreeToPlayMethod.Invoke(card, null));
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static int GetComboCost(CardModel card, AutoPlaySortContext context)
+        {
+            int combo;
+            return card != null && context.ComboCosts.TryGetValue(card, out combo) ? combo : int.MaxValue;
+        }
+
+        private static int ComputeRawComboCost(CardModel card)
         {
             if (card == null) return int.MaxValue;
             try { return card.GetCardComboCost(false); }
             catch { return int.MaxValue; }
+        }
+
+        private static Dictionary<CardModel, int> BuildManaCosts(List<CardModel> input)
+        {
+            var manaCosts = new Dictionary<CardModel, int>(input.Count);
+            foreach (var card in input)
+            {
+                if (card != null && !manaCosts.ContainsKey(card))
+                {
+                    manaCosts[card] = ComputeRawManaCost(card);
+                    DevLog.Info("CardFacts: manaCost " + SafeName(card) + " = " + manaCosts[card]);
+                }
+            }
+            return manaCosts;
+        }
+
+        private static Dictionary<CardModel, int> BuildComboCosts(List<CardModel> input)
+        {
+            var comboCosts = new Dictionary<CardModel, int>(input.Count);
+            foreach (var card in input)
+            {
+                if (card != null && !comboCosts.ContainsKey(card))
+                {
+                    comboCosts[card] = ComputeRawComboCost(card);
+                    DevLog.Info("CardFacts: comboCost " + SafeName(card) + " = " + comboCosts[card]);
+                }
+            }
+            return comboCosts;
+        }
+
+        private static Dictionary<CardModel, bool> BuildEvolvedFlags(List<CardModel> input)
+        {
+            var evolved = new Dictionary<CardModel, bool>(input.Count);
+            foreach (var card in input)
+            {
+                if (card == null || evolved.ContainsKey(card))
+                    continue;
+                bool value;
+                try { value = card.IsEvolved; }
+                catch { value = false; }
+                evolved[card] = value;
+                DevLog.Info("CardFacts: evolved " + SafeName(card) + " = " + value);
+            }
+            return evolved;
+        }
+
+        private static Dictionary<CardModel, bool> BuildInComboFlags(PlayerModel player, List<CardModel> input)
+        {
+            var inCombo = new Dictionary<CardModel, bool>(input.Count);
+            foreach (var card in input)
+            {
+                if (card == null || inCombo.ContainsKey(card))
+                    continue;
+                inCombo[card] = ComputeIsCurrentlyInCombo(player, card);
+                DevLog.Info("CardFacts: inComboNow " + SafeName(card) + " = " + inCombo[card]);
+            }
+            return inCombo;
+        }
+
+        private static bool ComputeIsCurrentlyInCombo(PlayerModel player, CardModel card)
+        {
+            if (player == null || card == null) return false;
+            try
+            {
+                if (s_playerIsCardInComboMethod != null)
+                    return Convert.ToBoolean(s_playerIsCardInComboMethod.Invoke(player, new object[] { card, true }));
+            }
+            catch { return false; }
+            return false;
         }
 
         private static Dictionary<CardModel, int> BuildOriginalIndex(List<CardModel> input)
@@ -782,16 +1049,138 @@ namespace BetterAutoPlay
             return index;
         }
 
-        private static int GetOriginalIndex(Dictionary<CardModel, int> index, CardModel card)
+        private static int GetOriginalIndex(AutoPlaySortContext context, CardModel card)
         {
             int result;
-            return card != null && index.TryGetValue(card, out result) ? result : int.MaxValue;
+            return card != null && context.OriginalIndex.TryGetValue(card, out result) ? result : int.MaxValue;
         }
 
         private static string SafeName(CardModel card)
         {
             try { return card?.Name ?? "?"; }
             catch { return "?"; }
+        }
+    }
+
+    internal sealed class AutoPlaySortContext
+    {
+        public AutoPlaySortContext(
+            Dictionary<CardModel, int> originalIndex,
+            Dictionary<CardModel, CardRole> roles,
+            Dictionary<CardModel, int> manaGains,
+            Dictionary<CardModel, int> manaCosts,
+            Dictionary<CardModel, int> comboCosts,
+            Dictionary<CardModel, bool> evolved,
+            Dictionary<CardModel, bool> inComboNow)
+        {
+            OriginalIndex = originalIndex;
+            Roles = roles;
+            ManaGains = manaGains;
+            ManaCosts = manaCosts;
+            ComboCosts = comboCosts;
+            Evolved = evolved;
+            InComboNow = inComboNow;
+        }
+
+        public Dictionary<CardModel, int> OriginalIndex { get; }
+        public Dictionary<CardModel, CardRole> Roles { get; }
+        public Dictionary<CardModel, int> ManaGains { get; }
+        public Dictionary<CardModel, int> ManaCosts { get; }
+        public Dictionary<CardModel, int> ComboCosts { get; }
+        public Dictionary<CardModel, bool> Evolved { get; }
+        public Dictionary<CardModel, bool> InComboNow { get; }
+    }
+
+    internal static class RetryPolicy
+    {
+        public static void PartitionByImmediatePlayability(PlayerModel player, List<CardModel> input, List<CardModel> immediate, List<CardModel> deferred)
+        {
+            foreach (var card in input)
+            {
+                if (card == null)
+                {
+                    deferred.Add(card);
+                    continue;
+                }
+
+                if (CanPlayImmediately(player, card))
+                {
+                    immediate.Add(card);
+                    DevLog.Info("Partition: immediate " + DescribeCard(card));
+                }
+                else
+                {
+                    deferred.Add(card);
+                    DevLog.Info("Partition: deferred " + DescribeCard(card));
+                }
+            }
+        }
+
+        private static bool CanPlayImmediately(PlayerModel player, CardModel card)
+        {
+            if (card == null)
+                return false;
+
+            if (AutoPlayRetryCooldown.IsCoolingDown(card))
+            {
+                DevLog.Info("CanPlayImmediately: false due to cooldown " + DescribeCard(card));
+                return false;
+            }
+
+            if (player == null)
+                return true;
+
+            try
+            {
+                bool canAfford = player.CanAffordCard(card);
+                DevLog.Info("CanPlayImmediately: CanAffordCard(" + DescribeCard(card) + ") = " + canAfford);
+                return canAfford;
+            }
+            catch { return true; }
+        }
+
+        private static string DescribeCard(CardModel card)
+        {
+            if (card == null)
+                return "<null>";
+            try
+            {
+                string name = card.Name ?? "?";
+                long ptr = card.Pointer.ToInt64();
+                return name + "@" + ptr;
+            }
+            catch
+            {
+                return "<card-ex>";
+            }
+        }
+    }
+
+    internal static class ReflectionCache
+    {
+        private static readonly Dictionary<Type, PropertyInfo> s_countAccessorByType = new Dictionary<Type, PropertyInfo>();
+        private static readonly Dictionary<Type, MethodInfo> s_getItemAccessorByType = new Dictionary<Type, MethodInfo>();
+
+        public static bool TryGetListAccessors(Type type, out PropertyInfo countProp, out MethodInfo getItemMethod)
+        {
+            countProp = null;
+            getItemMethod = null;
+            if (type == null)
+                return false;
+
+            if (!s_countAccessorByType.TryGetValue(type, out countProp))
+            {
+                countProp = type.GetProperty("Count") ?? type.GetProperty("Length");
+                s_countAccessorByType[type] = countProp;
+            }
+
+            if (!s_getItemAccessorByType.TryGetValue(type, out getItemMethod))
+            {
+                getItemMethod = type.GetMethod("get_Item");
+                s_getItemAccessorByType[type] = getItemMethod;
+            }
+
+            return countProp != null && getItemMethod != null;
         }
     }
 
