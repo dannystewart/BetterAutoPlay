@@ -745,16 +745,15 @@ namespace BetterAutoPlay
         }
 
         // Among cards that can combo after `previous`:
-        //   Tier 1 — ManaGenerators at any cost (always exempt from the flat penalty).
-        //   Tier 2 — Non-generators that strictly increase mana (forms a proper combo step).
-        //   Tier 3 — Non-generators that stay flat (same cost, last resort before decreasing).
-        //   Tier 4 — Anything with decreasing cost (final fallback).
-        // This prevents 0,0,0,0→1 chains by always pairing a 0-cost play with a 1-cost follow-up.
+        //   Tier 1 — Same-cost ManaGenerators.
+        //   Tier 2 — Strictly increasing mana, again favoring ManaGenerators inside the tier.
+        //   Tier 3 — Anything with decreasing cost (final fallback).
+        // This keeps valid 0->1->1->1->2 generator chains alive before stepping up,
+        // without spending same-cost non-generators before the next combo step.
         private static CardModel PickNextComboCard(List<CardModel> cards, CardModel previous, int previousMana, AutoPlaySortContext context)
         {
-            CardModel bestManaGen = null;
+            CardModel bestFlatManaGen = null;
             CardModel bestStrictIncrease = null;
-            CardModel bestFlatNonGen = null;
             CardModel bestDecreasing = null;
 
             foreach (var card in cards)
@@ -765,22 +764,20 @@ namespace BetterAutoPlay
                 int mana = GetManaCost(card, context);
                 CardRole role = GetRole(card, context);
 
-                if (role == CardRole.ManaGenerator)
-                    bestManaGen = BetterCard(bestManaGen, card, context);
+                if (mana == previousMana && role == CardRole.ManaGenerator)
+                    bestFlatManaGen = BetterCard(bestFlatManaGen, card, context);
                 else if (mana > previousMana)
                     bestStrictIncrease = BetterCard(bestStrictIncrease, card, context);
-                else if (mana == previousMana)
-                    bestFlatNonGen = BetterCard(bestFlatNonGen, card, context);
-                else
+                else if (mana < previousMana)
                     bestDecreasing = BetterCard(bestDecreasing, card, context);
             }
 
             // When currently below zero mana-cost, prioritize climbing the combo ladder first.
             // This ensures -1 -> 0 style transitions are not skipped by role-first heuristics.
             if (previousMana < 0)
-                return bestStrictIncrease ?? bestManaGen ?? bestFlatNonGen ?? bestDecreasing;
+                return bestStrictIncrease ?? bestFlatManaGen ?? bestDecreasing;
 
-            return bestManaGen ?? bestStrictIncrease ?? bestFlatNonGen ?? bestDecreasing;
+            return bestFlatManaGen ?? bestStrictIncrease ?? bestDecreasing;
         }
 
         // Sort leftover (non-combo) cards: role first, then mana gain (desc for generators),

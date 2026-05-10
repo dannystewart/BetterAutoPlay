@@ -10,7 +10,7 @@ A smart card sorting plugin for **Vampire Crawlers** that optimizes auto-play by
 
 - **Mana-First Strategy**: Mana-generating cards (Empty Tome, etc.) are played first to enable more plays
 - **Utility Buffing**: Utility/buff cards are played before attacks to maximize damage output
-- **Smart Combo Chain**: Prevents inefficient `0→0→0→1` chains by pairing low-cost plays with optimal follow-ups
+- **Smart Combo Chain**: Keeps same-cost mana-generator chains alive before stepping up to the next mana cost
 - **Crawler Support**: FCC companion cards are intelligently slotted into the play order
 - **Auto-Play Optimization**: Automatically enables Combo sorting mode during auto-play
 
@@ -30,9 +30,8 @@ Cards are classified into five priority tiers:
 
 1. **Starting Card**: Picks the best card that continues an existing combo, or the highest-priority card available
 2. **Combo Chain**: Selects next cards based on:
-   - Mana generators (always prioritized)
-   - Cards that **increase** mana cost (proper combo steps)
-   - Cards that **maintain** mana cost (fallback)
+   - Mana generators that **maintain** mana cost
+   - Cards that **increase** mana cost, with mana generators prioritized inside that step
    - Cards that **decrease** mana cost (last resort)
 3. **Remaining Cards**: Sorted by role → mana gain → mana cost → evolved status
 
