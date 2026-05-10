@@ -49,6 +49,10 @@
       <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\UnityEngine.CoreModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="UnityEngine.ImageConversionModule">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\UnityEngine.ImageConversionModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="UnityEngine.UI">
       <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\UnityEngine.UI.dll</HintPath>
       <Private>False</Private>
@@ -57,9 +61,28 @@
       <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\Unity.TextMeshPro.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="UnityEngine.UnityWebRequestModule">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\UnityEngine.UnityWebRequestModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UnityWebRequestTextureModule">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\UnityEngine.UnityWebRequestTextureModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UnityWebRequestWWWModule">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\UnityEngine.UnityWebRequestWWWModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="Sirenix.Serialization">
       <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\Sirenix.Serialization.dll</HintPath>
       <Private>False</Private>
     </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="assets\autoplay_logo.png">
+      <Link>BetterAutoPlay\autoplay_logo.png</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 </Project>
