@@ -1,6 +1,8 @@
 # Build outputs
 bin/
 obj/
+dist/
+IL2CPP/
 
 # User-specific files
 *.user
