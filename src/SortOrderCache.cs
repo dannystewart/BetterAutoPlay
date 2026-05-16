@@ -8,6 +8,7 @@ namespace BetterAutoPlay
     {
         private static object s_rawList;
         public static void Set(object list) { s_rawList = list; }
+        public static void Clear() { s_rawList = null; }
         public static List<CardModel> Get()
         {
             if (s_rawList == null) return null;
@@ -34,6 +35,15 @@ namespace BetterAutoPlay
         private static readonly HashSet<long> s_playedPtrs = new HashSet<long>();
         private static PlayerModel s_player;
 
+        public static void Reset()
+        {
+            Entries.Clear();
+            s_cardRefs.Clear();
+            s_playedPtrs.Clear();
+            s_player = null;
+            LiveHandCache.Clear();
+        }
+
         public static void Update(List<CardModel> sorted, PlayerModel player)
         {
             s_player = player;
@@ -44,24 +54,79 @@ namespace BetterAutoPlay
         public static void LiveUpdate(List<CardModel> sorted, PlayerModel player)
         {
             s_player = player;
+
+            var sortedPtrs = new HashSet<long>();
+            if (sorted != null)
+            {
+                for (int i = 0; i < sorted.Count; i++)
+                {
+                    long ptr = GetCardPtr(sorted[i]);
+                    if (ptr != 0)
+                        sortedPtrs.Add(ptr);
+                }
+            }
+
+            // Collect played entries whose cards are no longer in the incoming hand,
+            // so they survive the rebuild and stay visible in the overlay.
+            List<CardEntry> orphanEntries = null;
+            List<CardModel> orphanRefs    = null;
+            HashSet<long> orphanPtrs = null;
+            if (s_playedPtrs.Count > 0)
+            {
+                for (int i = 0; i < s_cardRefs.Count && i < Entries.Count; i++)
+                {
+                    if (!Entries[i].Played) continue;
+                    var cardRef = s_cardRefs[i];
+                    long ptr = GetCardPtr(cardRef);
+                    if (ptr == 0) continue;
+
+                    if (!sortedPtrs.Contains(ptr))
+                    {
+                        if (orphanPtrs != null && orphanPtrs.Contains(ptr))
+                            continue;
+
+                        if (orphanEntries == null)
+                        {
+                            orphanEntries = new List<CardEntry>();
+                            orphanRefs = new List<CardModel>();
+                            orphanPtrs = new HashSet<long>();
+                        }
+
+                        orphanEntries.Add(Entries[i]);
+                        orphanRefs.Add(cardRef);
+                        orphanPtrs.Add(ptr);
+                    }
+                }
+            }
+
             Rebuild(sorted, player);
+
+            // Re-insert played cards at the top in their original order.
+            if (orphanEntries != null)
+            {
+                Entries.InsertRange(0, orphanEntries);
+                s_cardRefs.InsertRange(0, orphanRefs);
+            }
         }
 
         private static void Rebuild(List<CardModel> sorted, PlayerModel player)
         {
             Entries.Clear();
             s_cardRefs.Clear();
+            var seenPtrs = new HashSet<long>();
             foreach (var card in sorted)
             {
                 if (card == null) continue;
+                long ptr = GetCardPtr(card);
+                if (ptr != 0 && !seenPtrs.Add(ptr))
+                    continue;
+
                 s_cardRefs.Add(card);
                 var role = CardClassifier.Classify(card);
                 var display = CardClassifier.Describe(card, role);
                 int mana = GetCurrentManaCost(card);
                 bool canAfford = true;
                 try { if (player != null) canAfford = player.CanAffordCard(card); } catch { }
-                long ptr = 0;
-                try { ptr = card.Pointer.ToInt64(); } catch { }
                 bool played = s_playedPtrs.Contains(ptr);
                 Entries.Add(new CardEntry
                 {
@@ -88,12 +153,41 @@ namespace BetterAutoPlay
                     try { e.CanAfford = s_player.CanAffordCard(card); } catch { }
                 }
                 e.ManaCost = GetCurrentManaCost(card);
-                var display = CardClassifier.Describe(card, e.Role);
-                e.RoleLabel = display.Label;
-                e.RoleColor = display.Color;
                 try { e.Played = s_playedPtrs.Contains(card.Pointer.ToInt64()); } catch { }
                 Entries[i] = e;
             }
+        }
+
+        public static bool TryRefreshEntry(CardModel card, out int index, out CardEntry entry)
+        {
+            index = -1;
+            entry = default;
+            if (card == null)
+                return false;
+
+            long ptr = GetCardPtr(card);
+            if (ptr == 0)
+                return false;
+
+            for (int i = 0; i < s_cardRefs.Count && i < Entries.Count; i++)
+            {
+                if (GetCardPtr(s_cardRefs[i]) != ptr)
+                    continue;
+
+                var e = Entries[i];
+                if (s_player != null)
+                {
+                    try { e.CanAfford = s_player.CanAffordCard(s_cardRefs[i]); } catch { }
+                }
+                e.ManaCost = GetCurrentManaCost(s_cardRefs[i]);
+                e.Played = s_playedPtrs.Contains(ptr);
+                Entries[i] = e;
+                index = i;
+                entry = e;
+                return true;
+            }
+
+            return false;
         }
 
         private static int GetCurrentManaCost(CardModel card)
@@ -108,13 +202,12 @@ namespace BetterAutoPlay
             if (card == null) return;
             try
             {
-                long ptr = card.Pointer.ToInt64();
+                long ptr = GetCardPtr(card);
                 if (ptr == 0) return;
                 s_playedPtrs.Add(ptr);
                 for (int i = 0; i < s_cardRefs.Count; i++)
                 {
-                    var c = s_cardRefs[i];
-                    if (c != null && c.Pointer.ToInt64() == ptr)
+                    if (GetCardPtr(s_cardRefs[i]) == ptr)
                     {
                         var e = Entries[i];
                         e.Played = true;
@@ -124,6 +217,13 @@ namespace BetterAutoPlay
                 }
             }
             catch { }
+        }
+
+        private static long GetCardPtr(CardModel card)
+        {
+            if (card == null) return 0;
+            try { return card.Pointer.ToInt64(); }
+            catch { return 0; }
         }
     }
 }

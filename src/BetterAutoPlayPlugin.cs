@@ -5,6 +5,7 @@ using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
 using BepInEx.Unity.IL2CPP.Utils;
 using HarmonyLib;
+using Nosebleed.Pancake.GameLogic.GameStates;
 using Nosebleed.Pancake.Models;
 using UnityEngine;
 using UnityEngine.UI;
@@ -27,6 +28,7 @@ namespace BetterAutoPlay
             var harmony = new Harmony(PluginGuid);
             harmony.PatchAll(typeof(BetterAutoPlayPlugin).Assembly);
             ModalTracker.TryPatchModals(harmony);
+            RewardModalTracker.TryPatchChooseCardModal(harmony);
             IL2CPPChainloader.AddUnityComponent<AutoPlayVisualUpdater>();
             Log.LogInfo(PluginName + " loaded");
         }
@@ -59,6 +61,42 @@ namespace BetterAutoPlay
 
         public static void OnOpened() { s_openCount++; DevLog.Info("ModalTracker: opened, count=" + s_openCount); }
         public static void OnClosed()  { if (s_openCount > 0) s_openCount--; DevLog.Info("ModalTracker: closed, count=" + s_openCount); }
+    }
+
+    internal static class RewardModalTracker
+    {
+        public static void TryPatchChooseCardModal(Harmony harmony)
+        {
+            try
+            {
+                var modalType = AccessTools.TypeByName("Nosebleed.Pancake.Modal.ChooseCardModal");
+                if (modalType == null)
+                {
+                    BetterAutoPlayPlugin.LogSource.LogWarning("[BAP] ChooseCardModal type not found");
+                    return;
+                }
+
+                var closed = AccessTools.Method(modalType, "OnClosed");
+                if (closed == null)
+                {
+                    BetterAutoPlayPlugin.LogSource.LogWarning("[BAP] ChooseCardModal.OnClosed not found");
+                    return;
+                }
+
+                harmony.Patch(closed, postfix: new HarmonyMethod(typeof(RewardModalTracker), nameof(OnChooseCardModalClosed)));
+                BetterAutoPlayPlugin.LogSource.LogInfo("[BAP] ChooseCardModal close patch applied");
+            }
+            catch (Exception ex)
+            {
+                BetterAutoPlayPlugin.LogSource.LogWarning("[BAP] ChooseCardModal patch failed: " + ex.Message);
+            }
+        }
+
+        public static void OnChooseCardModalClosed()
+        {
+            try { AutoPlayUiController.OnChooseCardModalClosed(); }
+            catch { }
+        }
     }
 
     internal sealed class AutoPlayVisualUpdater : MonoBehaviour
@@ -144,13 +182,6 @@ namespace BetterAutoPlay
     [HarmonyPatch(typeof(PlayerModel), "Button_AutoPlay")]
     internal static class PlayerModelButtonAutoPlayPatch
     {
-        private static bool Prefix()
-        {
-            if (AutoPlayUiController.IsOverlayOpen)
-                return false;
-            return true;
-        }
-
         private static void Postfix(PlayerModel __instance)
         {
             try { AutoPlayUiController.SyncPersistentToggle(__instance); }
@@ -183,6 +214,7 @@ namespace BetterAutoPlay
             {
                 AutoPlayRetryCooldown.Clear(cardModel);
                 SortOrderCache.MarkPlayed(cardModel);
+                AutoPlayUiController.OnOrderStateChanged(cardModel);
                 DevLog.Info("TryPlayCard Postfix: SUCCESS card=" + DescribeCard(cardModel) + " -> cooldown cleared");
                 return;
             }
@@ -194,10 +226,12 @@ namespace BetterAutoPlay
             if (__state || cannotAffordAfter)
             {
                 AutoPlayRetryCooldown.MarkFailed(cardModel);
+                AutoPlayUiController.OnOrderStateChanged(cardModel);
                 DevLog.Info("TryPlayCard Postfix: FAIL card=" + DescribeCard(cardModel) + ", cannotAffordBefore=" + __state + ", cannotAffordAfter=" + cannotAffordAfter + " -> cooldown marked");
             }
             else
             {
+                AutoPlayUiController.OnOrderStateChanged(cardModel);
                 DevLog.Info("TryPlayCard Postfix: FAIL card=" + DescribeCard(cardModel) + ", non-mana failure -> no cooldown");
             }
         }
@@ -216,6 +250,45 @@ namespace BetterAutoPlay
             {
                 return "<card-ex>";
             }
+        }
+    }
+
+    [HarmonyPatch(typeof(PlayerTurnState), "OnEnterState")]
+    internal static class PlayerTurnStateOnEnterPatch
+    {
+        private static void Postfix()
+        {
+            try
+            {
+                AutoPlayUiController.OnTurnStarted(null);
+            }
+            catch { }
+        }
+    }
+
+    [HarmonyPatch(typeof(PlayerEndTurnState), "OnEnterState")]
+    internal static class PlayerEndTurnStateOnEnterPatch
+    {
+        private static void Postfix()
+        {
+            try
+            {
+                AutoPlayUiController.OnTurnEnded(null);
+            }
+            catch { }
+        }
+    }
+
+    [HarmonyPatch(typeof(EncounterDefeatedState), "OnEnterState")]
+    internal static class EncounterDefeatedStateOnEnterPatch
+    {
+        private static void Postfix()
+        {
+            try
+            {
+                AutoPlayUiController.OnEncounterDefeated(null);
+            }
+            catch { }
         }
     }
 }

@@ -24,6 +24,8 @@ namespace BetterAutoPlay
         private static string s_lastResumeSkipReason;
         private static float s_nextSkipRepeatLogAt;
         private static float s_nextVisualRefreshAt;
+        private static float s_nextOverlayPrewarmAt;
+        private static bool s_pendingSortOrderRebuild;
         private static TMP_Text s_cachedPlayAllLabel;
         private static string s_defaultPlayAllLabelText;
         private static Color s_defaultPlayAllLabelColor;
@@ -59,16 +61,22 @@ namespace BetterAutoPlay
         private static bool s_orderButtonCreated;
         private static Button s_lastSeenPlayAllButton;
         private static TMP_Text s_cachedPlayAllLabelForButton;
-        private static readonly System.Text.StringBuilder s_overlaySb = new System.Text.StringBuilder(512);
         private static readonly List<OverlayRow> s_overlayRows = new List<OverlayRow>();
         private static Sprite s_manaOrbSprite;
         private static bool s_manaOrbSpriteGenerated;
         private static float s_nextManaOrbSpriteSearchAt;
         private static Texture2D s_generatedManaOrbTexture;
+        private static Material s_dissolveTextMaterialTemplate;
+        private static bool s_attemptedDissolveTextMaterialCapture;
         private static long s_lastHandFingerprint;
+        private static bool s_loggedOverlayTextMaterialProbe;
+        private static bool s_loggedGlobalTmpDissolveProbe;
 
         private const float OverlayRowHeight = 22f;
+        private const float OverlayRowExitDissolveDurationSeconds = 0.28f;
+        private const float OverlayRowEnterDissolveDurationSeconds = 0.40f;
         private const int OverlaySortingOrder = 32767;
+        private const string DissolveAmountPropertyName = "_DissolveAmount";
 
         private sealed class OverlayRow
         {
@@ -79,6 +87,17 @@ namespace BetterAutoPlay
             public TMP_Text ManaText;
             public Image ManaIcon;
             public string IndexLabel; // cached so we don't reformat every tick
+            public Material IndexBaseMaterial;
+            public Material NameBaseMaterial;
+            public Material TagBaseMaterial;
+            public Material ManaBaseMaterial;
+            public Material IndexDissolveMaterial;
+            public Material NameDissolveMaterial;
+            public Material TagDissolveMaterial;
+            public Material ManaDissolveMaterial;
+            public bool Dissolving;
+            public bool DissolveEntering;
+            public float DissolveStartedAt;
         }
 
         public static void Tick()
@@ -90,9 +109,9 @@ namespace BetterAutoPlay
             if (DevLog.FullEnabled)
                 DevLog.Info("Tick() -> TryResumePersistentAutoPlay()");
             TryResumePersistentAutoPlay();
+            TryPrewarmOverlayAssets(now);
             Refresh(s_lastPlayer);
-            if (s_overlayOpen)
-                UpdateOverlayContent();
+            UpdateOverlayRowDissolves(now);
         }
 
         public static void OnButtonPointerEnter(Selectable s)
@@ -128,13 +147,12 @@ namespace BetterAutoPlay
             }
         }
 
-        public static bool IsOverlayOpen => s_overlayOpen;
-
         public static void Refresh(PlayerModel player)
         {
             if (player == null)
                 return;
             s_lastPlayer = player;
+            TryProcessPendingSortOrderRebuild(player);
 
             Button button = null;
             try { button = player.PlayAllButton; } catch { }
@@ -172,13 +190,6 @@ namespace BetterAutoPlay
             if (s_refreshButton != null)
                 try { if (!s_refreshButton.interactable) s_refreshButton.interactable = true; } catch { }
 
-            try
-            {
-                bool wantPlayAllInteractable = !s_overlayOpen;
-                if (button.interactable != wantPlayAllInteractable)
-                    button.interactable = wantPlayAllInteractable;
-            }
-            catch { }
 
             if (s_cachedPlayAllLabel != label)
             {
@@ -240,12 +251,6 @@ namespace BetterAutoPlay
 
         private static void TryResumePersistentAutoPlay()
         {
-            if (s_overlayOpen)
-            {
-                LogResumeSkip("order overlay is open");
-                return;
-            }
-
             if (ModalTracker.AnyOpen)
             {
                 LogResumeSkip("modal is open");
@@ -422,7 +427,7 @@ namespace BetterAutoPlay
             rt.anchorMax = new Vector2(0.5f, 0.5f);
             rt.pivot = new Vector2(0.5f, 0.5f);
             rt.sizeDelta = new Vector2(380f, panelH);
-            rt.anchoredPosition = new Vector2(0f, buttonHeight * 0.5f + panelH * 0.5f + 8f);
+            rt.anchoredPosition = new Vector2(6f, buttonHeight * 0.5f + panelH * 0.5f + 8f);
 
             Transform topCanvas = FindCanvasTransform(buttonParent);
             panelGo.transform.SetParent(topCanvas, true);
@@ -587,12 +592,6 @@ namespace BetterAutoPlay
             s_overlayOpen = !s_overlayOpen;
             DevLog.Info("ToggleOverlay: open=" + s_overlayOpen);
 
-            if (s_overlayOpen)
-            {
-                try { s_autoPlayerStopMethod?.Invoke(s_lastPlayer?.AutoPlayer, null); } catch { }
-                s_lastHandFingerprint = 0;
-            }
-
             if (s_overlayPanel != null)
                 s_overlayPanel.SetActive(s_overlayOpen);
 
@@ -600,19 +599,22 @@ namespace BetterAutoPlay
                 s_orderButtonLabel.text = s_overlayOpen ? "Close" : "Order";
 
             if (s_overlayOpen)
+            {
+                if (s_dissolveTextMaterialTemplate == null && !s_attemptedDissolveTextMaterialCapture)
+                    TryCaptureDissolveTextMaterialTemplate();
                 UpdateOverlayContent();
+            }
         }
 
         private static void OnRefreshClicked()
         {
-            DevLog.Info("OnRefreshClicked: forcing hand fingerprint reset");
-            s_lastHandFingerprint = 0;
+            DevLog.Info("OnRefreshClicked: redraw overlay only");
             UpdateOverlayContent();
         }
 
-        private static void TryLiveRefreshHand()
+        private static bool RebuildSortOrderFromCurrentHand()
         {
-            if (s_lastPlayer == null) return;
+            if (s_lastPlayer == null) return false;
             try
             {
                 List<CardModel> hand = null;
@@ -628,16 +630,6 @@ namespace BetterAutoPlay
                             int count = cardPile.Count;
                             if (count > 0)
                             {
-                                // Compute fingerprint from CardPile before allocating a List.
-                                long fpEarly = count;
-                                for (int i = 0; i < count; i++)
-                                {
-                                    CardModel card;
-                                    if (cardPile.TryPeekIndex(i, out card) && card != null)
-                                        try { fpEarly ^= card.Pointer.ToInt64() * (i + 1); } catch { }
-                                }
-                                if (fpEarly == s_lastHandFingerprint) return;
-
                                 hand = new List<CardModel>(count);
                                 for (int i = 0; i < count; i++)
                                 {
@@ -651,21 +643,26 @@ namespace BetterAutoPlay
                 }
                 catch { }
 
-                // Fallback to cached list from last SortCardsByCombo call.
-                if (hand == null || hand.Count == 0)
+                // Fallback to the last autoplay-sorted hand only when the live hand
+                // could not be read at all for this explicit rebuild request.
+                if (hand == null)
                     hand = LiveHandCache.Get();
 
-                if (hand == null || hand.Count == 0) return;
+                if (hand == null || hand.Count == 0)
+                {
+                    DevLog.Info("RebuildSortOrderFromCurrentHand: no cards available, leaving cache unchanged");
+                    return false;
+                }
 
-                // Skip the sort + allocation if the hand hasn't changed since last tick.
                 long fp = HandFingerprint(hand);
-                if (fp == s_lastHandFingerprint) return;
                 s_lastHandFingerprint = fp;
 
                 var sorted = ComboManaSorter.SortPreservePlayed(s_lastPlayer, hand);
                 SortOrderCache.LiveUpdate(sorted, s_lastPlayer);
+                return true;
             }
             catch { }
+            return false;
         }
 
         private static long HandFingerprint(List<CardModel> hand)
@@ -680,78 +677,172 @@ namespace BetterAutoPlay
             return fp;
         }
 
+        private static void InvalidateOverlayRefreshState()
+        {
+            s_lastHandFingerprint = 0;
+        }
+
+        private static void RequestSortOrderRebuild(PlayerModel player, string reason, bool clearCacheFirst)
+        {
+            if (player != null)
+                s_lastPlayer = player;
+            InvalidateOverlayRefreshState();
+            if (clearCacheFirst)
+                SortOrderCache.Reset();
+            s_pendingSortOrderRebuild = true;
+            DevLog.Info(reason);
+            if (s_overlayOpen)
+                UpdateOverlayContent();
+        }
+
+        private static void TryProcessPendingSortOrderRebuild(PlayerModel player)
+        {
+            if (!s_pendingSortOrderRebuild)
+                return;
+
+            if (player != null)
+                s_lastPlayer = player;
+
+            if (!RebuildSortOrderFromCurrentHand())
+                return;
+
+            s_pendingSortOrderRebuild = false;
+            DevLog.Info("TryProcessPendingSortOrderRebuild: rebuild completed");
+            if (s_overlayOpen)
+                UpdateOverlayContent();
+        }
+
+        public static void OnTurnStarted(PlayerModel player)
+        {
+            RequestSortOrderRebuild(player, "OnTurnStarted: queued order cache rebuild", true);
+        }
+
+        public static void OnTurnEnded(PlayerModel player)
+        {
+            RequestSortOrderRebuild(player, "OnTurnEnded: queued order cache rebuild", true);
+        }
+
+        public static void OnEncounterDefeated(PlayerModel player)
+        {
+            RequestSortOrderRebuild(player, "OnEncounterDefeated: queued order cache rebuild", true);
+        }
+
+        public static void OnChooseCardModalClosed()
+        {
+            RequestSortOrderRebuild(null, "OnChooseCardModalClosed: queued soft order cache rebuild", false);
+        }
+
+        public static void OnOrderStateChanged(CardModel card)
+        {
+            if (!s_overlayOpen || card == null)
+                return;
+
+            int index;
+            SortOrderCache.CardEntry entry;
+            if (!SortOrderCache.TryRefreshEntry(card, out index, out entry))
+                return;
+
+            UpdateOverlayRow(index, entry);
+        }
+
         private static void UpdateOverlayContent()
         {
             if (s_overlayContentText == null || s_overlayContentRoot == null) return;
 
-            TryLiveRefreshHand();
             SortOrderCache.RefreshAffordability();
 
             var entries = SortOrderCache.Entries;
             if (entries.Count == 0)
             {
-                HideOverlayRows();
+                HideOverlayRows(false);
                 s_overlayContentText.gameObject.SetActive(true);
                 s_overlayContentText.text = "<color=#666666>No sort data yet.\nTrigger autoplay once to populate.</color>";
                 return;
             }
 
             s_overlayContentText.gameObject.SetActive(false);
+            TryCaptureDissolveTextMaterialTemplate();
             EnsureOverlayRows(entries.Count);
+            MaybeRunOverlayTextMaterialProbe();
 
             var manaSprite = GetManaOrbSprite();
             for (int i = 0; i < entries.Count; i++)
             {
-                var e = entries[i];
-                var row = s_overlayRows[i];
-                row.Root.SetActive(true);
-
-                // Index — only write once per row (index never changes after row creation)
-                string idxStr = row.IndexLabel;
-                if (idxStr == null)
-                {
-                    idxStr = (i + 1).ToString() + ".";
-                    row.IndexLabel = idxStr;
-                    row.IndexText.text = idxStr;
-                    row.IndexText.color = s_overlayIndexColor;
-                }
-
-                // Name + color
-                if (row.NameText.text != e.Name)
-                    row.NameText.text = e.Name;
-                Color nameColor = e.Played ? s_overlayPlayedColor : (e.CanAfford ? Color.white : s_overlayUnAffordColor);
-                if (row.NameText.color != nameColor)
-                    row.NameText.color = nameColor;
-
-                // Tag
-                string roleLabel = string.IsNullOrEmpty(e.RoleLabel) ? e.Role.ToString() : e.RoleLabel;
-                string tagStr = "[" + roleLabel + "]";
-                if (row.TagText.text != tagStr)
-                    row.TagText.text = tagStr;
-                Color tagColor = HtmlColor(string.IsNullOrEmpty(e.RoleColor) ? RoleColor(e.Role) : e.RoleColor, Color.gray);
-                if (row.TagText.color != tagColor)
-                    row.TagText.color = tagColor;
-
-                // Mana
-                string manaStr = e.ManaCost.ToString();
-                if (row.ManaText.text != manaStr)
-                    row.ManaText.text = manaStr;
-                if (row.ManaText.color != s_overlayManaColor)
-                    row.ManaText.color = s_overlayManaColor;
-
-                row.ManaIcon.enabled = true;
-                row.ManaIcon.sprite = manaSprite;
+                UpdateOverlayRow(i, entries[i]);
             }
 
             for (int i = entries.Count; i < s_overlayRows.Count; i++)
-                s_overlayRows[i].Root.SetActive(false);
+                StartRowDissolve(s_overlayRows[i]);
         }
 
-        private static void HideOverlayRows()
+        private static void HideOverlayRows(bool immediate = true)
         {
             for (int i = 0; i < s_overlayRows.Count; i++)
-                if (s_overlayRows[i].Root != null)
-                    s_overlayRows[i].Root.SetActive(false);
+            {
+                var row = s_overlayRows[i];
+                if (row.Root == null)
+                    continue;
+
+                if (immediate)
+                {
+                    CancelRowDissolve(row);
+                    row.Root.SetActive(false);
+                }
+                else
+                {
+                    StartRowDissolve(row);
+                }
+            }
+        }
+
+        private static void UpdateOverlayRow(int index, SortOrderCache.CardEntry entry)
+        {
+            if (index < 0 || index >= s_overlayRows.Count)
+                return;
+
+            var row = s_overlayRows[index];
+            if (row == null || row.Root == null)
+                return;
+
+            bool shouldAnimateIn = false;
+            try { shouldAnimateIn = !row.Root.activeSelf || (row.Dissolving && !row.DissolveEntering); } catch { }
+            CancelRowDissolve(row);
+            row.Root.SetActive(true);
+
+            string idxStr = row.IndexLabel;
+            if (idxStr == null)
+            {
+                idxStr = (index + 1).ToString() + ".";
+                row.IndexLabel = idxStr;
+                row.IndexText.text = idxStr;
+                row.IndexText.color = s_overlayIndexColor;
+            }
+
+            if (row.NameText.text != entry.Name)
+                row.NameText.text = entry.Name;
+            Color nameColor = entry.Played ? s_overlayPlayedColor : (entry.CanAfford ? Color.white : s_overlayUnAffordColor);
+            if (row.NameText.color != nameColor)
+                row.NameText.color = nameColor;
+
+            string roleLabel = string.IsNullOrEmpty(entry.RoleLabel) ? entry.Role.ToString() : entry.RoleLabel;
+            string tagStr = "[" + roleLabel + "]";
+            if (row.TagText.text != tagStr)
+                row.TagText.text = tagStr;
+            Color tagColor = HtmlColor(string.IsNullOrEmpty(entry.RoleColor) ? CardClassifier.RoleColor(entry.Role) : entry.RoleColor, Color.gray);
+            if (row.TagText.color != tagColor)
+                row.TagText.color = tagColor;
+
+            string manaStr = entry.ManaCost.ToString();
+            if (row.ManaText.text != manaStr)
+                row.ManaText.text = manaStr;
+            if (row.ManaText.color != s_overlayManaColor)
+                row.ManaText.color = s_overlayManaColor;
+
+            row.ManaIcon.enabled = true;
+            row.ManaIcon.sprite = GetManaOrbSprite();
+
+            if (shouldAnimateIn)
+                StartRowAppear(row);
         }
 
         private static void EnsureOverlayRows(int count)
@@ -782,7 +873,76 @@ namespace BetterAutoPlay
             row.TagText   = CreateOverlayRowText(rowGo.transform, "Tag",   202f, 82f,  11f, TextAlignmentOptions.MidlineLeft);
             row.ManaText  = CreateOverlayRowText(rowGo.transform, "Mana",  286f, 26f,  12f, TextAlignmentOptions.MidlineRight);
             row.ManaIcon  = CreateOverlayManaIcon(rowGo.transform, 318f);
+            CaptureBaseMaterial(ref row.IndexBaseMaterial, row.IndexText);
+            CaptureBaseMaterial(ref row.NameBaseMaterial, row.NameText);
+            CaptureBaseMaterial(ref row.TagBaseMaterial, row.TagText);
+            CaptureBaseMaterial(ref row.ManaBaseMaterial, row.ManaText);
+            rowGo.SetActive(false);
             return row;
+        }
+
+        private static void TryCaptureDissolveTextMaterialTemplate()
+        {
+            if (s_dissolveTextMaterialTemplate != null || s_attemptedDissolveTextMaterialCapture)
+                return;
+
+            s_attemptedDissolveTextMaterialCapture = true;
+
+            try
+            {
+                var texts = Resources.FindObjectsOfTypeAll<TMP_Text>();
+                if (texts == null)
+                    return;
+
+                for (int i = 0; i < texts.Length; i++)
+                {
+                    var text = texts[i];
+                    if (text == null)
+                        continue;
+
+                    var fontMaterial = SafeGetFontMaterial(text);
+                    var sharedMaterial = SafeGetSharedMaterial(text);
+                    Material template = SelectBestDissolveMaterial(fontMaterial) ?? SelectBestDissolveMaterial(sharedMaterial);
+                    if (template == null)
+                        continue;
+
+                    s_dissolveTextMaterialTemplate = new Material(template);
+                    s_dissolveTextMaterialTemplate.name = template.name + " [BAP Template]";
+                    DevLog.Info("[TMPProbe] Captured dissolve TMP material template from " + GetTransformPath(text.transform)
+                        + " material='" + template.name + "' shader='" + SafeGetShaderName(template) + "'");
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                DevLog.Info("[TMPProbe] Dissolve TMP material capture failed: " + ex.Message);
+            }
+        }
+
+        private static void MaybeRunOverlayTextMaterialProbe()
+        {
+            if (!DevLog.FullEnabled)
+                return;
+
+            if (!s_loggedOverlayTextMaterialProbe)
+            {
+                s_loggedOverlayTextMaterialProbe = true;
+                DevLog.Info("[TMPProbe] Overlay row material probe starting");
+                for (int i = 0; i < s_overlayRows.Count; i++)
+                {
+                    var row = s_overlayRows[i];
+                    ProbeTmpTextMaterial("Overlay.Row" + (i + 1) + ".Index", row.IndexText);
+                    ProbeTmpTextMaterial("Overlay.Row" + (i + 1) + ".Name", row.NameText);
+                    ProbeTmpTextMaterial("Overlay.Row" + (i + 1) + ".Tag", row.TagText);
+                    ProbeTmpTextMaterial("Overlay.Row" + (i + 1) + ".Mana", row.ManaText);
+                }
+            }
+
+            if (!s_loggedGlobalTmpDissolveProbe)
+            {
+                s_loggedGlobalTmpDissolveProbe = true;
+                ProbeGlobalTmpTextsForDissolve();
+            }
         }
 
         private static TMP_Text CreateOverlayRowText(Transform parent, string name, float x, float width, float fontSize, TextAlignmentOptions alignment)
@@ -804,6 +964,178 @@ namespace BetterAutoPlay
             text.margin = Vector4.zero;
             text.raycastTarget = false;
             return text;
+        }
+
+        private static void CaptureBaseMaterial(ref Material destination, TMP_Text text)
+        {
+            if (destination != null || text == null)
+                return;
+
+            try
+            {
+                var current = SafeGetSharedMaterial(text);
+                if (current == null)
+                    current = SafeGetFontMaterial(text);
+                if (current == null)
+                    return;
+
+                destination = new Material(current);
+                destination.name = current.name + " [BAP Base " + text.name + "]";
+            }
+            catch { }
+        }
+
+        private static void UpdateOverlayRowDissolves(float now)
+        {
+            for (int i = 0; i < s_overlayRows.Count; i++)
+            {
+                var row = s_overlayRows[i];
+                if (!row.Dissolving)
+                    continue;
+
+                float duration = row.DissolveEntering ? OverlayRowEnterDissolveDurationSeconds : OverlayRowExitDissolveDurationSeconds;
+                float t = Mathf.Clamp01((now - row.DissolveStartedAt) / duration);
+                float dissolveAmount = row.DissolveEntering ? (1f - t) : t;
+                SetRowDissolveAmount(row, dissolveAmount);
+
+                try
+                {
+                    row.Root.transform.localScale = row.DissolveEntering
+                        ? Vector3.Lerp(new Vector3(0.94f, 0.94f, 1f), Vector3.one, t)
+                        : Vector3.Lerp(Vector3.one, new Vector3(0.94f, 0.94f, 1f), t);
+                }
+                catch { }
+
+                if (t < 1f)
+                    continue;
+
+                bool wasEntering = row.DissolveEntering;
+                row.Dissolving = false;
+                row.DissolveEntering = false;
+                RestoreBaseMaterials(row);
+                try { row.Root.transform.localScale = Vector3.one; } catch { }
+                if (!wasEntering)
+                    try { row.Root.SetActive(false); } catch { }
+            }
+        }
+
+        private static void StartRowAppear(OverlayRow row)
+        {
+            if (row == null || row.Root == null)
+                return;
+
+            if (s_dissolveTextMaterialTemplate == null)
+                return;
+
+            ApplyDissolveMaterial(row.IndexText, ref row.IndexDissolveMaterial);
+            ApplyDissolveMaterial(row.NameText, ref row.NameDissolveMaterial);
+            ApplyDissolveMaterial(row.TagText, ref row.TagDissolveMaterial);
+            ApplyDissolveMaterial(row.ManaText, ref row.ManaDissolveMaterial);
+            SetRowDissolveAmount(row, 1f);
+            row.Dissolving = true;
+            row.DissolveEntering = true;
+            row.DissolveStartedAt = Time.realtimeSinceStartup;
+            try { row.Root.transform.localScale = new Vector3(0.94f, 0.94f, 1f); } catch { }
+        }
+
+        private static void StartRowDissolve(OverlayRow row)
+        {
+            if (row == null || row.Root == null)
+                return;
+
+            bool isActive = false;
+            try { isActive = row.Root.activeSelf; } catch { }
+            if (!isActive || row.Dissolving)
+                return;
+
+            if (s_dissolveTextMaterialTemplate == null)
+            {
+                row.Root.SetActive(false);
+                return;
+            }
+
+            ApplyDissolveMaterial(row.IndexText, ref row.IndexDissolveMaterial);
+            ApplyDissolveMaterial(row.NameText, ref row.NameDissolveMaterial);
+            ApplyDissolveMaterial(row.TagText, ref row.TagDissolveMaterial);
+            ApplyDissolveMaterial(row.ManaText, ref row.ManaDissolveMaterial);
+            SetRowDissolveAmount(row, 0f);
+            row.Dissolving = true;
+            row.DissolveEntering = false;
+            row.DissolveStartedAt = Time.realtimeSinceStartup;
+        }
+
+        private static void CancelRowDissolve(OverlayRow row)
+        {
+            if (row == null)
+                return;
+
+            if (!row.Dissolving)
+            {
+                RestoreBaseMaterials(row);
+                return;
+            }
+
+            row.Dissolving = false;
+            row.DissolveEntering = false;
+            SetRowDissolveAmount(row, 0f);
+            RestoreBaseMaterials(row);
+            try { if (row.Root != null) row.Root.transform.localScale = Vector3.one; } catch { }
+        }
+
+        private static void RestoreBaseMaterials(OverlayRow row)
+        {
+            RestoreBaseMaterial(row.IndexText, row.IndexBaseMaterial);
+            RestoreBaseMaterial(row.NameText, row.NameBaseMaterial);
+            RestoreBaseMaterial(row.TagText, row.TagBaseMaterial);
+            RestoreBaseMaterial(row.ManaText, row.ManaBaseMaterial);
+        }
+
+        private static void RestoreBaseMaterial(TMP_Text text, Material material)
+        {
+            if (text == null || material == null)
+                return;
+
+            try { text.fontSharedMaterial = material; }
+            catch { }
+        }
+
+        private static void ApplyDissolveMaterial(TMP_Text text, ref Material destination)
+        {
+            if (text == null || s_dissolveTextMaterialTemplate == null)
+                return;
+
+            try
+            {
+                if (destination == null)
+                {
+                    destination = new Material(s_dissolveTextMaterialTemplate);
+                    destination.name = s_dissolveTextMaterialTemplate.name + " [" + text.name + " Dissolve]";
+                }
+
+                text.fontSharedMaterial = destination;
+            }
+            catch { }
+        }
+
+        private static void SetRowDissolveAmount(OverlayRow row, float value)
+        {
+            SetMaterialDissolveAmount(row.IndexDissolveMaterial, value);
+            SetMaterialDissolveAmount(row.NameDissolveMaterial, value);
+            SetMaterialDissolveAmount(row.TagDissolveMaterial, value);
+            SetMaterialDissolveAmount(row.ManaDissolveMaterial, value);
+        }
+
+        private static void SetMaterialDissolveAmount(Material material, float value)
+        {
+            if (material == null)
+                return;
+
+            try
+            {
+                if (material.HasProperty(DissolveAmountPropertyName))
+                    material.SetFloat(DissolveAmountPropertyName, value);
+            }
+            catch { }
         }
 
         private static void CreateHeaderCell(Transform parent, string label, float x, float width, TextAlignmentOptions alignment, TMP_FontAsset font)
@@ -851,28 +1183,47 @@ namespace BetterAutoPlay
 
         private static Sprite GetManaOrbSprite()
         {
-            if (s_manaOrbSprite != null && !s_manaOrbSpriteGenerated)
-                return s_manaOrbSprite;
-
-            if (s_manaOrbSprite == null || Time.realtimeSinceStartup >= s_nextManaOrbSpriteSearchAt)
+            if (s_manaOrbSprite == null)
             {
-                s_nextManaOrbSpriteSearchAt = Time.realtimeSinceStartup + 2f;
-                var gameSprite = TryFindGameManaOrbSprite();
-                if (gameSprite != null)
-                {
-                    s_manaOrbSprite = gameSprite;
-                    s_manaOrbSpriteGenerated = false;
-                    return s_manaOrbSprite;
-                }
+                s_manaOrbSprite = CreateGeneratedManaOrbSprite();
+                s_manaOrbSpriteGenerated = true;
+            }
+            return s_manaOrbSprite;
+        }
+
+        private static void TryPrewarmOverlayAssets(float now)
+        {
+            if (now < s_nextOverlayPrewarmAt)
+                return;
+
+            s_nextOverlayPrewarmAt = now + 1f;
+
+            if (s_dissolveTextMaterialTemplate == null && !s_attemptedDissolveTextMaterialCapture)
+            {
+                TryCaptureDissolveTextMaterialTemplate();
+                return;
             }
 
             if (s_manaOrbSprite == null)
             {
                 s_manaOrbSprite = CreateGeneratedManaOrbSprite();
                 s_manaOrbSpriteGenerated = true;
+                return;
             }
 
-            return s_manaOrbSprite;
+            if (!s_manaOrbSpriteGenerated)
+                return;
+
+            if (now < s_nextManaOrbSpriteSearchAt)
+                return;
+
+            s_nextManaOrbSpriteSearchAt = now + 2f;
+            var gameSprite = TryFindGameManaOrbSprite();
+            if (gameSprite == null)
+                return;
+
+            s_manaOrbSprite = gameSprite;
+            s_manaOrbSpriteGenerated = false;
         }
 
         private static Sprite TryFindGameManaOrbSprite()
@@ -953,6 +1304,250 @@ namespace BetterAutoPlay
             return string.IsNullOrEmpty(value) ? "" : value.ToLowerInvariant();
         }
 
+        private static void ProbeGlobalTmpTextsForDissolve()
+        {
+            try
+            {
+                var texts = Resources.FindObjectsOfTypeAll<TMP_Text>();
+                if (texts == null)
+                {
+                    DevLog.Info("[TMPProbe] Global TMP dissolve scan found no TMP_Text objects");
+                    return;
+                }
+
+                int logged = 0;
+                for (int i = 0; i < texts.Length; i++)
+                {
+                    var text = texts[i];
+                    if (text == null)
+                        continue;
+
+                    var fontMaterial = SafeGetFontMaterial(text);
+                    var sharedMaterial = SafeGetSharedMaterial(text);
+                    var renderingMaterial = SafeGetMaterialForRendering(text);
+
+                    if (!MaterialLooksDissolveCapable(fontMaterial) &&
+                        !MaterialLooksDissolveCapable(sharedMaterial) &&
+                        !MaterialLooksDissolveCapable(renderingMaterial))
+                        continue;
+
+                    DevLog.Info("[TMPProbe] Dissolve-capable TMP text found at " + GetTransformPath(text.transform));
+                    ProbeTmpTextMaterial("GlobalTMP[" + logged + "]", text);
+                    logged++;
+                    if (logged >= 20)
+                        break;
+                }
+
+                DevLog.Info("[TMPProbe] Global TMP dissolve scan complete. Matches=" + logged + ", Total=" + texts.Length);
+            }
+            catch (Exception ex)
+            {
+                DevLog.Info("[TMPProbe] Global TMP dissolve scan failed: " + ex.Message);
+            }
+        }
+
+        private static Material SelectBestDissolveMaterial(Material material)
+        {
+            if (!MaterialLooksDissolveCapable(material))
+                return null;
+
+            string shaderName = SafeLower(SafeGetShaderName(material));
+            if (shaderName.Contains("distance field dissolve"))
+                return material;
+
+            if (shaderName.Contains("dissolve"))
+                return material;
+
+            return null;
+        }
+
+        private static void ProbeTmpTextMaterial(string label, TMP_Text text)
+        {
+            if (text == null)
+            {
+                DevLog.Info("[TMPProbe] " + label + " -> text is null");
+                return;
+            }
+
+            try
+            {
+                DevLog.Info("[TMPProbe] " + label + " path=" + GetTransformPath(text.transform) + ", text='" + SafeSnippet(text.text) + "'");
+            }
+            catch { }
+
+            ProbeMaterial(label + ".fontMaterial", SafeGetFontMaterial(text));
+            ProbeMaterial(label + ".sharedMaterial", SafeGetSharedMaterial(text));
+            ProbeMaterial(label + ".materialForRendering", SafeGetMaterialForRendering(text));
+        }
+
+        private static void ProbeMaterial(string label, Material material)
+        {
+            if (material == null)
+            {
+                DevLog.Info("[TMPProbe] " + label + " -> null");
+                return;
+            }
+
+            string shaderName = "?";
+            try { shaderName = material.shader != null ? material.shader.name : "<null-shader>"; } catch { }
+
+            string keywords = "";
+            try
+            {
+                var shaderKeywords = material.shaderKeywords;
+                if (shaderKeywords != null && shaderKeywords.Length > 0)
+                    keywords = string.Join(",", shaderKeywords);
+            }
+            catch { }
+
+            DevLog.Info("[TMPProbe] " + label + " material='" + material.name + "', shader='" + shaderName + "', dissolveLike=" + MaterialLooksDissolveCapable(material) + ", keywords='" + keywords + "'");
+
+            string[] candidateProps =
+            {
+                "_DissolveAmount",
+                "_Dissolve",
+                "_DissolveValue",
+                "_DissolveFade",
+                "_DissolveAlpha",
+                "_DissolveProgress",
+                "_Cutoff"
+            };
+
+            for (int i = 0; i < candidateProps.Length; i++)
+            {
+                string prop = candidateProps[i];
+                bool hasProp = false;
+                try { hasProp = material.HasProperty(prop); } catch { }
+                if (!hasProp)
+                    continue;
+
+                float value = 0f;
+                try { value = material.GetFloat(prop); } catch { }
+                DevLog.Info("[TMPProbe] " + label + " property " + prop + "=" + value.ToString("F4"));
+            }
+
+            try
+            {
+                var shader = material.shader;
+                if (shader == null)
+                    return;
+
+                var getCount = typeof(Shader).GetMethod("GetPropertyCount", Type.EmptyTypes);
+                var getName = typeof(Shader).GetMethod("GetPropertyName", new[] { typeof(int) });
+                if (getCount == null || getName == null)
+                    return;
+
+                int count = Convert.ToInt32(getCount.Invoke(shader, null));
+                for (int i = 0; i < count; i++)
+                {
+                    string propName = getName.Invoke(shader, new object[] { i }) as string;
+                    if (string.IsNullOrEmpty(propName))
+                        continue;
+
+                    string normalized = SafeLower(propName);
+                    if (normalized.Contains("dissolve") || normalized.Contains("cutoff") || normalized.Contains("fade"))
+                        DevLog.Info("[TMPProbe] " + label + " shader property candidate=" + propName);
+                }
+            }
+            catch { }
+        }
+
+        private static bool MaterialLooksDissolveCapable(Material material)
+        {
+            if (material == null)
+                return false;
+
+            try
+            {
+                if (material.shader != null)
+                {
+                    string shaderName = SafeLower(material.shader.name);
+                    if (shaderName.Contains("dissolve") || shaderName.Contains("fade"))
+                        return true;
+                }
+            }
+            catch { }
+
+            string[] candidateProps =
+            {
+                "_DissolveAmount",
+                "_Dissolve",
+                "_DissolveValue",
+                "_DissolveFade",
+                "_DissolveAlpha",
+                "_DissolveProgress",
+                "_Cutoff"
+            };
+
+            for (int i = 0; i < candidateProps.Length; i++)
+            {
+                try
+                {
+                    if (material.HasProperty(candidateProps[i]))
+                        return true;
+                }
+                catch { }
+            }
+
+            return false;
+        }
+
+        private static string SafeGetShaderName(Material material)
+        {
+            if (material == null)
+                return "";
+
+            try { return material.shader != null ? (material.shader.name ?? "") : ""; }
+            catch { return ""; }
+        }
+
+        private static Material SafeGetFontMaterial(TMP_Text text)
+        {
+            try { return text.fontMaterial; }
+            catch { return null; }
+        }
+
+        private static Material SafeGetSharedMaterial(TMP_Text text)
+        {
+            try { return text.fontSharedMaterial; }
+            catch { return null; }
+        }
+
+        private static Material SafeGetMaterialForRendering(TMP_Text text)
+        {
+            try { return text.materialForRendering; }
+            catch { return null; }
+        }
+
+        private static string SafeSnippet(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return "";
+
+            value = value.Replace("\r", " ").Replace("\n", " ");
+            return value.Length <= 48 ? value : value.Substring(0, 48);
+        }
+
+        private static string GetTransformPath(Transform transform)
+        {
+            if (transform == null)
+                return "<null>";
+
+            string path = transform.name;
+            try
+            {
+                var current = transform.parent;
+                while (current != null)
+                {
+                    path = current.name + "/" + path;
+                    current = current.parent;
+                }
+            }
+            catch { }
+
+            return path;
+        }
+
         private static Sprite CreateGeneratedManaOrbSprite()
         {
             const int size = 32;
@@ -993,18 +1588,6 @@ namespace BetterAutoPlay
                 new Rect(0f, 0f, size, size),
                 new Vector2(0.5f, 0.5f),
                 size);
-        }
-
-        private static string RoleColor(CardRole role)
-        {
-            switch (role)
-            {
-                case CardRole.ManaGenerator: return "#44aaff";
-                case CardRole.Utility:       return "#ffcc44";
-                case CardRole.Crawler:       return "#bb66ff";
-                case CardRole.Attack:        return "#ff4444";
-                default:                     return "#777777";
-            }
         }
 
         private static void LogResumeSkip(string reason)

@@ -56,9 +56,7 @@ namespace BetterAutoPlay
 
         public static List<CardModel> Sort(PlayerModel player, List<CardModel> input)
         {
-            var ordered = SortCore(player, input);
-            SortOrderCache.Update(ordered, player);
-            return ordered;
+            return SortCore(player, input);
         }
 
         public static List<CardModel> SortPreservePlayed(PlayerModel player, List<CardModel> input)
@@ -473,7 +471,6 @@ namespace BetterAutoPlay
                 int utility = GetCardUtilityScore(card, context);
                 var availableAtStep = BuildAvailableAtStep(played, remaining, i);
                 score.CardUtility += utility * (positionWeight + 1);
-                score.RoleScore += GetRoleWeight(GetRole(card, context)) * positionWeight;
                 score.ManaOrderScore += Math.Max(0, 30 - mana) * positionWeight * 90;
                 if (ShouldPreferUtilityForSameManaNoClimb(previous, card, availableAtStep, context))
                     score.SameManaPenalty += 2200;
@@ -771,18 +768,6 @@ namespace BetterAutoPlay
             return card != null && context.DrawScores.TryGetValue(card, out draw) ? draw : 0;
         }
 
-        private static int GetRoleWeight(CardRole role)
-        {
-            switch (role)
-            {
-                case CardRole.ManaGenerator: return 45;
-                case CardRole.Utility:       return 34;
-                case CardRole.Crawler:       return 26;
-                case CardRole.Attack:        return 22;
-                default:                     return 0;
-            }
-        }
-
         private static bool IsEvolved(CardModel card, AutoPlaySortContext context)
         {
             bool value;
@@ -997,7 +982,6 @@ namespace BetterAutoPlay
             public int ManaFlowScore;
             public int ManaOrderScore;
             public int LowStartScore;
-            public int RoleScore;
             public int StartMana;
             public int FirstOriginalIndex;
 

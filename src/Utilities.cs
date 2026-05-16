@@ -97,15 +97,14 @@ namespace BetterAutoPlay
             if (il2CppList == null)
                 return result;
 
-            Type type = il2CppList.GetType();
-            PropertyInfo countProperty = type.GetProperty("Count");
-            MethodInfo getItemMethod = type.GetMethod("get_Item");
-            int count = Convert.ToInt32(countProperty.GetValue(il2CppList, null));
+            PropertyInfo countProperty;
+            MethodInfo getItemMethod;
+            if (!ReflectionCache.TryGetListAccessors(il2CppList.GetType(), out countProperty, out getItemMethod))
+                return result;
 
+            int count = Convert.ToInt32(countProperty.GetValue(il2CppList, null));
             for (int i = 0; i < count; i++)
-            {
                 result.Add(getItemMethod.Invoke(il2CppList, new object[] { i }) as CardModel);
-            }
 
             return result;
         }

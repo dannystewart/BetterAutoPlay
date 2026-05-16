@@ -84,7 +84,7 @@ namespace BetterAutoPlay
             }
             catch { }
 
-            return new CardDisplayTag(role.ToString(), FallbackRoleColor(role));
+            return new CardDisplayTag(role.ToString(), RoleColor(role));
         }
 
         private static bool HasManaEffect(CardConfig config)
@@ -499,7 +499,7 @@ namespace BetterAutoPlay
             return false;
         }
 
-        private static string FallbackRoleColor(CardRole role)
+        internal static string RoleColor(CardRole role)
         {
             switch (role)
             {
