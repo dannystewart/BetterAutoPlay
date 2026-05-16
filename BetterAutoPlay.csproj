@@ -57,6 +57,18 @@
       <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\UnityEngine.UI.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\UnityEngine.UIModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Unity.InputSystem">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\Unity.InputSystem.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="Unity.TextMeshPro">
       <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\interop\Unity.TextMeshPro.dll</HintPath>
       <Private>False</Private>
