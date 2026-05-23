@@ -17,7 +17,7 @@ namespace BetterAutoPlay
     {
         public const string PluginGuid    = "critical.vampirecrawlers.betterautoplay";
         public const string PluginName    = "AutoPlay Combo Mana Sorter";
-        public const string PluginVersion = "0.1.0";
+        public const string PluginVersion = "0.3.0";
 
         internal static ManualLogSource LogSource;
 
@@ -29,8 +29,89 @@ namespace BetterAutoPlay
             harmony.PatchAll(typeof(BetterAutoPlayPlugin).Assembly);
             ModalTracker.TryPatchModals(harmony);
             RewardModalTracker.TryPatchChooseCardModal(harmony);
+            CardViewTracker.TryPatchCardAddedToHand(harmony);
             IL2CPPChainloader.AddUnityComponent<AutoPlayVisualUpdater>();
             Log.LogInfo(PluginName + " loaded");
+        }
+    }
+
+    internal static class CardViewTracker
+    {
+        public static void TryPatchCardAddedToHand(Harmony harmony)
+        {
+            try
+            {
+                var cardViewType = AccessTools.TypeByName("CardView");
+                if (cardViewType == null)
+                {
+                    BetterAutoPlayPlugin.LogSource.LogWarning("[BAP] CardView type not found");
+                    return;
+                }
+
+                var onCardAddedToHand = AccessTools.Method(cardViewType, "OnCardAddedToHand", new[] { typeof(PlayerModel) });
+                if (onCardAddedToHand == null)
+                {
+                    BetterAutoPlayPlugin.LogSource.LogWarning("[BAP] CardView.OnCardAddedToHand(PlayerModel) not found");
+                    return;
+                }
+
+                harmony.Patch(onCardAddedToHand, postfix: new HarmonyMethod(typeof(CardViewTracker), nameof(OnCardAddedToHandPostfix)));
+                BetterAutoPlayPlugin.LogSource.LogInfo("[BAP] CardView.OnCardAddedToHand patch applied");
+            }
+            catch (Exception ex)
+            {
+                BetterAutoPlayPlugin.LogSource.LogWarning("[BAP] CardView patch failed: " + ex.Message);
+            }
+        }
+
+        public static void OnCardAddedToHandPostfix(object __instance, PlayerModel playerModel)
+        {
+            if (__instance == null || playerModel == null)
+                return;
+
+            try
+            {
+                object cardObj;
+                if (!TryReadMemberValue(__instance, "CardModel", out cardObj))
+                    return;
+
+                var cardModel = cardObj as CardModel;
+                if (cardModel == null)
+                    return;
+
+                ComboManaSorter.OnCardAddedToHand(playerModel, cardModel);
+            }
+            catch { }
+        }
+
+        private static bool TryReadMemberValue(object target, string memberName, out object value)
+        {
+            value = null;
+            if (target == null || string.IsNullOrEmpty(memberName))
+                return false;
+
+            try
+            {
+                PropertyInfo property;
+                FieldInfo field;
+                if (!ReflectionCache.TryGetMemberAccessors(target.GetType(), memberName, out property, out field))
+                    return false;
+
+                if (property != null)
+                {
+                    value = property.GetValue(target, null);
+                    return true;
+                }
+
+                if (field != null)
+                {
+                    value = field.GetValue(target);
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
         }
     }
 
@@ -210,11 +291,16 @@ namespace BetterAutoPlay
             if (!isAutoPlay)
                 return;
 
+            bool orderOverlayOpen = AutoPlayUiController.IsOrderOverlayOpen();
+
             if (__result)
             {
                 AutoPlayRetryCooldown.Clear(cardModel);
-                SortOrderCache.MarkPlayed(cardModel);
-                AutoPlayUiController.OnOrderStateChanged(cardModel);
+                if (orderOverlayOpen)
+                {
+                    SortOrderCache.MarkPlayed(cardModel);
+                    AutoPlayUiController.OnOrderStateChanged(cardModel);
+                }
                 DevLog.Info("TryPlayCard Postfix: SUCCESS card=" + DescribeCard(cardModel) + " -> cooldown cleared");
                 return;
             }
@@ -226,12 +312,14 @@ namespace BetterAutoPlay
             if (__state || cannotAffordAfter)
             {
                 AutoPlayRetryCooldown.MarkFailed(cardModel);
-                AutoPlayUiController.OnOrderStateChanged(cardModel);
+                if (orderOverlayOpen)
+                    AutoPlayUiController.OnOrderStateChanged(cardModel);
                 DevLog.Info("TryPlayCard Postfix: FAIL card=" + DescribeCard(cardModel) + ", cannotAffordBefore=" + __state + ", cannotAffordAfter=" + cannotAffordAfter + " -> cooldown marked");
             }
             else
             {
-                AutoPlayUiController.OnOrderStateChanged(cardModel);
+                if (orderOverlayOpen)
+                    AutoPlayUiController.OnOrderStateChanged(cardModel);
                 DevLog.Info("TryPlayCard Postfix: FAIL card=" + DescribeCard(cardModel) + ", non-mana failure -> no cooldown");
             }
         }

@@ -65,6 +65,8 @@ namespace BetterAutoPlay
     {
         private static readonly Dictionary<Type, PropertyInfo> s_countAccessorByType = new Dictionary<Type, PropertyInfo>();
         private static readonly Dictionary<Type, MethodInfo> s_getItemAccessorByType = new Dictionary<Type, MethodInfo>();
+        private static readonly Dictionary<string, PropertyInfo> s_propertyAccessorByTypeAndName = new Dictionary<string, PropertyInfo>();
+        private static readonly Dictionary<string, FieldInfo> s_fieldAccessorByTypeAndName = new Dictionary<string, FieldInfo>();
 
         public static bool TryGetListAccessors(Type type, out PropertyInfo countProp, out MethodInfo getItemMethod)
         {
@@ -86,6 +88,33 @@ namespace BetterAutoPlay
             }
 
             return countProp != null && getItemMethod != null;
+        }
+
+        public static bool TryGetMemberAccessors(Type type, string memberName, out PropertyInfo property, out FieldInfo field)
+        {
+            property = null;
+            field = null;
+            if (type == null || string.IsNullOrEmpty(memberName))
+                return false;
+
+            string key = type.FullName + "|" + memberName;
+
+            if (!s_propertyAccessorByTypeAndName.TryGetValue(key, out property))
+            {
+                property = type.GetProperty(memberName);
+                s_propertyAccessorByTypeAndName[key] = property;
+            }
+
+            if (property != null)
+                return true;
+
+            if (!s_fieldAccessorByTypeAndName.TryGetValue(key, out field))
+            {
+                field = type.GetField(memberName);
+                s_fieldAccessorByTypeAndName[key] = field;
+            }
+
+            return field != null;
         }
     }
 

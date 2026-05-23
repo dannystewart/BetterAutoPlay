@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using Nosebleed.Pancake.GameConfig;
 using Nosebleed.Pancake.Models;
@@ -29,6 +30,18 @@ namespace BetterAutoPlay
 
     internal static class CardClassifier
     {
+        internal struct CachedConfigAnalysis
+        {
+            public CardRole Role;
+            public CardDisplayTag EffectTag;
+            public bool HasEffectTag;
+            public CardDisplayTag ConfigTypeTag;
+            public bool HasConfigTypeTag;
+            public int StaticManaGain;
+            public int ManaEqualToCostCount;
+            public int DrawScore;
+        }
+
         private static readonly PropertyInfo s_cardGroupProp =
             AccessTools.Property(typeof(CardConfig), "cardGroup");
         private static readonly PropertyInfo s_isWeaponProp =
@@ -39,6 +52,10 @@ namespace BetterAutoPlay
             AccessTools.Property(typeof(CardModel), "CardTypes");
         private static readonly PropertyInfo s_cardTypeProp =
             AccessTools.Property(typeof(CardConfig), "cardType");
+        private static readonly ConditionalWeakTable<CardConfig, StrongBox<CachedConfigAnalysis>> s_analysisByConfig =
+            new ConditionalWeakTable<CardConfig, StrongBox<CachedConfigAnalysis>>();
+        private static readonly ConditionalWeakTable<CardModel, StrongBox<CardDisplayTag>> s_runtimeTagByCard =
+            new ConditionalWeakTable<CardModel, StrongBox<CardDisplayTag>>();
 
         public static CardRole Classify(CardModel card)
         {
@@ -46,7 +63,77 @@ namespace BetterAutoPlay
             {
                 var config = card?.CardConfig;
                 if (config == null) return CardRole.Unknown;
+                return GetCachedConfigAnalysis(config).Role;
+            }
+            catch
+            {
+                return CardRole.Unknown;
+            }
+        }
 
+        public static CardDisplayTag Describe(CardModel card, CardRole role)
+        {
+            try
+            {
+                var config = card?.CardConfig;
+                if (config != null)
+                {
+                    var analysis = GetCachedConfigAnalysis(config);
+                    if (analysis.HasEffectTag)
+                        return analysis.EffectTag;
+
+                    if (analysis.HasConfigTypeTag)
+                        return analysis.ConfigTypeTag;
+                }
+
+                CardDisplayTag tag;
+                if (TryGetRuntimeCardTypeTag(card, out tag))
+                    return tag;
+            }
+            catch { }
+
+            return new CardDisplayTag(role.ToString(), RoleColor(role));
+        }
+
+        internal static CachedConfigAnalysis GetCachedConfigAnalysis(CardConfig config)
+        {
+            if (config == null)
+                return default;
+
+            StrongBox<CachedConfigAnalysis> cached;
+            if (!s_analysisByConfig.TryGetValue(config, out cached))
+            {
+                cached = new StrongBox<CachedConfigAnalysis>(AnalyzeConfig(config));
+                s_analysisByConfig.Add(config, cached);
+            }
+
+            return cached.Value;
+        }
+
+        private static CachedConfigAnalysis AnalyzeConfig(CardConfig config)
+        {
+            var analysis = new CachedConfigAnalysis();
+            try
+            {
+                analysis.Role = DetermineRole(config);
+                analysis.HasConfigTypeTag = TryGetConfigCardTypeTag(config, out analysis.ConfigTypeTag);
+                AnalyzeEffects(config, analysis.Role, analysis.HasConfigTypeTag ? analysis.ConfigTypeTag.Color : null, ref analysis);
+            }
+            catch
+            {
+                analysis.Role = CardRole.Unknown;
+            }
+
+            return analysis;
+        }
+
+        private static CardRole DetermineRole(CardConfig config)
+        {
+            if (config == null)
+                return CardRole.Unknown;
+
+            try
+            {
                 if (config.GetType().Name == "FccConfig")
                     return CardRole.Crawler;
 
@@ -62,29 +149,6 @@ namespace BetterAutoPlay
             {
                 return CardRole.Unknown;
             }
-        }
-
-        public static CardDisplayTag Describe(CardModel card, CardRole role)
-        {
-            try
-            {
-                var config = card?.CardConfig;
-                CardDisplayTag configTypeTag;
-                bool hasConfigType = TryGetConfigCardTypeTag(config, out configTypeTag);
-
-                CardDisplayTag tag;
-                if (config != null && TryGetEffectTag(config, role, hasConfigType ? configTypeTag.Color : null, out tag))
-                    return tag;
-
-                if (hasConfigType)
-                    return configTypeTag;
-
-                if (TryGetRuntimeCardTypeTag(card, out tag))
-                    return tag;
-            }
-            catch { }
-
-            return new CardDisplayTag(role.ToString(), RoleColor(role));
         }
 
         private static bool HasManaEffect(CardConfig config)
@@ -150,13 +214,33 @@ namespace BetterAutoPlay
 
             try
             {
-                var cardTypes = s_cardTypesProp?.GetValue(card);
-                if (TryBuildCardTypesTag(cardTypes, out tag))
-                    return true;
+                StrongBox<CardDisplayTag> cached;
+                if (!s_runtimeTagByCard.TryGetValue(card, out cached))
+                {
+                    cached = new StrongBox<CardDisplayTag>(BuildRuntimeCardTypeTag(card));
+                    s_runtimeTagByCard.Add(card, cached);
+                }
+
+                tag = cached.Value;
+                return !string.IsNullOrEmpty(tag.Label);
             }
             catch { }
 
             return false;
+        }
+
+        private static CardDisplayTag BuildRuntimeCardTypeTag(CardModel card)
+        {
+            try
+            {
+                var cardTypes = s_cardTypesProp?.GetValue(card);
+                CardDisplayTag tag;
+                if (TryBuildCardTypesTag(cardTypes, out tag))
+                    return tag;
+            }
+            catch { }
+
+            return default;
         }
 
         private static bool TryBuildCardTypesTag(object cardTypes, out CardDisplayTag tag)
@@ -231,25 +315,25 @@ namespace BetterAutoPlay
             return true;
         }
 
-        private static bool TryGetEffectTag(CardConfig config, CardRole role, string preferredColor, out CardDisplayTag tag)
+        private static void AnalyzeEffects(CardConfig config, CardRole role, string preferredColor, ref CachedConfigAnalysis analysis)
         {
-            tag = default;
             try
             {
                 if (config.GetType().Name == "FccConfig")
                 {
-                    tag = new CardDisplayTag("Character", string.IsNullOrEmpty(preferredColor) ? "#bb66ff" : preferredColor);
-                    return true;
+                    analysis.EffectTag = new CardDisplayTag("Character", string.IsNullOrEmpty(preferredColor) ? "#bb66ff" : preferredColor);
+                    analysis.HasEffectTag = true;
+                    return;
                 }
 
                 var effects = s_onPlayEffectsProp?.GetValue(config);
                 if (effects == null)
-                    return false;
+                    return;
 
                 PropertyInfo countProp;
                 MethodInfo getItem;
                 if (!ReflectionCache.TryGetListAccessors(effects.GetType(), out countProp, out getItem))
-                    return false;
+                    return;
 
                 CardDisplayTag fallback = default;
                 int count = Convert.ToInt32(countProp.GetValue(effects));
@@ -262,25 +346,42 @@ namespace BetterAutoPlay
                     string name = effect.GetType().Name;
                     if (name == "GainManaEffect" || name == "GainManaEqualToCostEffect")
                     {
-                        tag = new CardDisplayTag("Mana", string.IsNullOrEmpty(preferredColor) ? "#44aaff" : preferredColor);
-                        return true;
+                        if (name == "GainManaEffect" && effect != null && ComboManaSorter.GainAmountProperty != null)
+                            analysis.StaticManaGain += Convert.ToInt32(ComboManaSorter.GainAmountProperty.GetValue(effect));
+                        else if (name == "GainManaEqualToCostEffect")
+                            analysis.ManaEqualToCostCount++;
+
+                        if (!analysis.HasEffectTag)
+                        {
+                            analysis.EffectTag = new CardDisplayTag("Mana", string.IsNullOrEmpty(preferredColor) ? "#44aaff" : preferredColor);
+                            analysis.HasEffectTag = true;
+                        }
                     }
-                    if (name.IndexOf("Draw", StringComparison.OrdinalIgnoreCase) >= 0)
+
+                    if (name.IndexOf("Draw", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("CardDraw", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("AddCard", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
-                        tag = new CardDisplayTag("Draw", string.IsNullOrEmpty(preferredColor) ? "#44dd88" : preferredColor);
-                        return true;
+                        analysis.DrawScore += 1;
+                        if (!analysis.HasEffectTag)
+                        {
+                            analysis.EffectTag = new CardDisplayTag("Draw", string.IsNullOrEmpty(preferredColor) ? "#44dd88" : preferredColor);
+                            analysis.HasEffectTag = true;
+                        }
                     }
-                    if (name.IndexOf("Cost", StringComparison.OrdinalIgnoreCase) >= 0)
+
+                    if (!analysis.HasEffectTag && name.IndexOf("Cost", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
-                        tag = new CardDisplayTag("Cost", string.IsNullOrEmpty(preferredColor) ? "#66ccff" : preferredColor);
-                        return true;
+                        analysis.EffectTag = new CardDisplayTag("Cost", string.IsNullOrEmpty(preferredColor) ? "#66ccff" : preferredColor);
+                        analysis.HasEffectTag = true;
                     }
-                    if (name.IndexOf("CreateCard", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        name.IndexOf("CloneCard", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        name.IndexOf("Copy", StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (!analysis.HasEffectTag &&
+                        (name.IndexOf("CreateCard", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         name.IndexOf("CloneCard", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         name.IndexOf("Copy", StringComparison.OrdinalIgnoreCase) >= 0))
                     {
-                        tag = new CardDisplayTag("Copy", string.IsNullOrEmpty(preferredColor) ? "#ffaa66" : preferredColor);
-                        return true;
+                        analysis.EffectTag = new CardDisplayTag("Copy", string.IsNullOrEmpty(preferredColor) ? "#ffaa66" : preferredColor);
+                        analysis.HasEffectTag = true;
                     }
 
                     if (IsDamageEffectName(name))
@@ -295,19 +396,19 @@ namespace BetterAutoPlay
 
                 if (!string.IsNullOrEmpty(fallback.Label))
                 {
-                    tag = fallback;
-                    return true;
+                    analysis.EffectTag = fallback;
+                    analysis.HasEffectTag = true;
+                    return;
                 }
 
                 if (role == CardRole.Attack)
                 {
-                    tag = new CardDisplayTag("Attack", string.IsNullOrEmpty(preferredColor) ? "#ff4444" : preferredColor);
-                    return true;
+                    analysis.EffectTag = new CardDisplayTag("Attack", string.IsNullOrEmpty(preferredColor) ? "#ff4444" : preferredColor);
+                    analysis.HasEffectTag = true;
+                    return;
                 }
             }
             catch { }
-
-            return false;
         }
 
         private static bool IsDamageEffectName(string name)
@@ -480,14 +581,17 @@ namespace BetterAutoPlay
             try
             {
                 Type type = target.GetType();
-                var prop = type.GetProperty(memberName);
+                PropertyInfo prop;
+                FieldInfo field;
+                if (!ReflectionCache.TryGetMemberAccessors(type, memberName, out prop, out field))
+                    return false;
+
                 if (prop != null)
                 {
                     value = prop.GetValue(target);
                     return true;
                 }
 
-                var field = type.GetField(memberName);
                 if (field != null)
                 {
                     value = field.GetValue(target);

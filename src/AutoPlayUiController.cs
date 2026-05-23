@@ -152,7 +152,8 @@ namespace BetterAutoPlay
             if (player == null)
                 return;
             s_lastPlayer = player;
-            TryProcessPendingSortOrderRebuild(player);
+            if (s_overlayOpen)
+                TryProcessPendingSortOrderRebuild(player);
 
             Button button = null;
             try { button = player.PlayAllButton; } catch { }
@@ -602,13 +603,16 @@ namespace BetterAutoPlay
             {
                 if (s_dissolveTextMaterialTemplate == null && !s_attemptedDissolveTextMaterialCapture)
                     TryCaptureDissolveTextMaterialTemplate();
+                EnsureSortOrderReadyForOverlay();
                 UpdateOverlayContent();
             }
         }
 
         private static void OnRefreshClicked()
         {
-            DevLog.Info("OnRefreshClicked: redraw overlay only");
+            DevLog.Info("OnRefreshClicked: rebuilding overlay sort cache");
+            s_pendingSortOrderRebuild = true;
+            TryProcessPendingSortOrderRebuild(s_lastPlayer);
             UpdateOverlayContent();
         }
 
@@ -692,12 +696,15 @@ namespace BetterAutoPlay
             s_pendingSortOrderRebuild = true;
             DevLog.Info(reason);
             if (s_overlayOpen)
+            {
+                TryProcessPendingSortOrderRebuild(player);
                 UpdateOverlayContent();
+            }
         }
 
         private static void TryProcessPendingSortOrderRebuild(PlayerModel player)
         {
-            if (!s_pendingSortOrderRebuild)
+            if (!s_overlayOpen || !s_pendingSortOrderRebuild)
                 return;
 
             if (player != null)
@@ -712,18 +719,34 @@ namespace BetterAutoPlay
                 UpdateOverlayContent();
         }
 
+        private static void EnsureSortOrderReadyForOverlay()
+        {
+            if (SortOrderCache.Entries.Count == 0)
+                s_pendingSortOrderRebuild = true;
+
+            TryProcessPendingSortOrderRebuild(s_lastPlayer);
+        }
+
+        public static bool IsOrderOverlayOpen()
+        {
+            return s_overlayOpen;
+        }
+
         public static void OnTurnStarted(PlayerModel player)
         {
+            ComboManaSorter.OnTurnStarted(player ?? s_lastPlayer);
             RequestSortOrderRebuild(player, "OnTurnStarted: queued order cache rebuild", true);
         }
 
         public static void OnTurnEnded(PlayerModel player)
         {
+            ComboManaSorter.OnTurnEnded();
             RequestSortOrderRebuild(player, "OnTurnEnded: queued order cache rebuild", true);
         }
 
         public static void OnEncounterDefeated(PlayerModel player)
         {
+            ComboManaSorter.OnTurnEnded();
             RequestSortOrderRebuild(player, "OnEncounterDefeated: queued order cache rebuild", true);
         }
 

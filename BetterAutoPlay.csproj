@@ -91,10 +91,4 @@
     </Reference>
   </ItemGroup>
 
-  <ItemGroup>
-    <None Include="assets\autoplay_logo.png">
-      <Link>BetterAutoPlay\autoplay_logo.png</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-  </ItemGroup>
 </Project>

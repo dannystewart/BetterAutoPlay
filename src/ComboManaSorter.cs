@@ -17,7 +17,8 @@ namespace BetterAutoPlay
             Dictionary<CardModel, int> manaCosts,
             Dictionary<CardModel, int> comboCosts,
             Dictionary<CardModel, bool> evolved,
-            Dictionary<CardModel, bool> inComboNow)
+            Dictionary<CardModel, bool> inComboNow,
+            HashSet<ComboPairKey> comboPairs)
         {
             OriginalIndex = originalIndex;
             Roles = roles;
@@ -27,6 +28,7 @@ namespace BetterAutoPlay
             ComboCosts = comboCosts;
             Evolved = evolved;
             InComboNow = inComboNow;
+            ComboPairs = comboPairs;
         }
 
         public Dictionary<CardModel, int> OriginalIndex { get; }
@@ -37,10 +39,52 @@ namespace BetterAutoPlay
         public Dictionary<CardModel, int> ComboCosts { get; }
         public Dictionary<CardModel, bool> Evolved { get; }
         public Dictionary<CardModel, bool> InComboNow { get; }
+        public HashSet<ComboPairKey> ComboPairs { get; }
+    }
+
+    internal struct ComboPairKey : IEquatable<ComboPairKey>
+    {
+        public readonly long PreviousPtr;
+        public readonly long CardPtr;
+
+        public ComboPairKey(long previousPtr, long cardPtr)
+        {
+            PreviousPtr = previousPtr;
+            CardPtr = cardPtr;
+        }
+
+        public bool Equals(ComboPairKey other)
+        {
+            return PreviousPtr == other.PreviousPtr && CardPtr == other.CardPtr;
+        }
+
+        public override bool Equals(object obj)
+        {
+            return obj is ComboPairKey other && Equals(other);
+        }
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                return (PreviousPtr.GetHashCode() * 397) ^ CardPtr.GetHashCode();
+            }
+        }
     }
 
     internal static class ComboManaSorter
     {
+        private struct TurnCardFacts
+        {
+            public CardRole Role;
+            public int ManaGain;
+            public int DrawScore;
+            public int ManaCost;
+            public int ComboCost;
+            public bool Evolved;
+            public bool InComboNow;
+        }
+
         private static readonly PropertyInfo s_gainAmountProp =
             AccessTools.Property(typeof(Nosebleed.Pancake.GameCommands.GainManaEffect), "_gainAmount");
         private static readonly PropertyInfo s_onPlayEffectsProp =
@@ -53,6 +97,40 @@ namespace BetterAutoPlay
             AccessTools.Method(typeof(CardConfig), "GetManaCost", Type.EmptyTypes);
         private const int MaxComboSearchDepth = 8;
         private const int ComboSearchBeamWidth = 50;
+        private static readonly Dictionary<long, TurnCardFacts> s_turnFactsByPtr = new Dictionary<long, TurnCardFacts>();
+        private static readonly HashSet<ComboPairKey> s_turnComboPairs = new HashSet<ComboPairKey>();
+        private static readonly string[] s_turnPileMemberNames = new[]
+        {
+            "HandPile",
+            "DrawPile",
+            "DeckPile",
+            "DiscardPile",
+            "ExhaustPile"
+        };
+        private static PlayerModel s_turnPreparedPlayer;
+        private static bool s_turnPrepared;
+
+        internal static PropertyInfo GainAmountProperty => s_gainAmountProp;
+
+        public static void OnTurnStarted(PlayerModel player)
+        {
+            ResetTurnFacts();
+            PrepareTurnFacts(player);
+        }
+
+        public static void OnTurnEnded()
+        {
+            ResetTurnFacts();
+        }
+
+        public static void OnCardAddedToHand(PlayerModel player, CardModel card)
+        {
+            if (!s_turnPrepared || player == null || card == null)
+                return;
+
+            s_turnPreparedPlayer = player;
+            AddCardToTurnFacts(player, card);
+        }
 
         public static List<CardModel> Sort(PlayerModel player, List<CardModel> input)
         {
@@ -96,6 +174,9 @@ namespace BetterAutoPlay
 
         private static AutoPlaySortContext BuildContext(PlayerModel player, List<CardModel> subset)
         {
+            if (s_turnPrepared && subset != null && subset.Count > 0)
+                return BuildContextFromTurnFacts(subset);
+
             var originalIndex = BuildOriginalIndex(subset);
             var roles = BuildRoles(subset);
             var manaGains = BuildManaGains(subset, roles);
@@ -104,7 +185,39 @@ namespace BetterAutoPlay
             var comboCosts = BuildComboCosts(subset);
             var evolved = BuildEvolvedFlags(subset);
             var inComboNow = BuildInComboFlags(player, subset);
-            return new AutoPlaySortContext(originalIndex, roles, manaGains, drawScores, manaCosts, comboCosts, evolved, inComboNow);
+            return new AutoPlaySortContext(originalIndex, roles, manaGains, drawScores, manaCosts, comboCosts, evolved, inComboNow, null);
+        }
+
+        private static AutoPlaySortContext BuildContextFromTurnFacts(List<CardModel> subset)
+        {
+            var originalIndex = BuildOriginalIndex(subset);
+            var roles = new Dictionary<CardModel, CardRole>(subset.Count);
+            var manaGains = new Dictionary<CardModel, int>(subset.Count);
+            var drawScores = new Dictionary<CardModel, int>(subset.Count);
+            var manaCosts = new Dictionary<CardModel, int>(subset.Count);
+            var comboCosts = new Dictionary<CardModel, int>(subset.Count);
+            var evolved = new Dictionary<CardModel, bool>(subset.Count);
+            var inComboNow = new Dictionary<CardModel, bool>(subset.Count);
+
+            foreach (var card in subset)
+            {
+                if (card == null || roles.ContainsKey(card))
+                    continue;
+
+                TurnCardFacts facts;
+                if (!TryGetTurnFacts(card, out facts))
+                    facts = BuildFallbackTurnFacts(s_turnPreparedPlayer, card);
+
+                roles[card] = facts.Role;
+                manaGains[card] = facts.ManaGain;
+                drawScores[card] = facts.DrawScore;
+                manaCosts[card] = facts.ManaCost;
+                comboCosts[card] = facts.ComboCost;
+                evolved[card] = facts.Evolved;
+                inComboNow[card] = facts.InComboNow;
+            }
+
+            return new AutoPlaySortContext(originalIndex, roles, manaGains, drawScores, manaCosts, comboCosts, evolved, inComboNow, s_turnComboPairs);
         }
 
         private static Dictionary<CardModel, CardRole> BuildRoles(List<CardModel> input)
@@ -161,27 +274,14 @@ namespace BetterAutoPlay
         {
             try
             {
-                var effects = s_onPlayEffectsProp?.GetValue(card.CardConfig);
-                if (effects == null) return 0;
-
-                PropertyInfo countProp;
-                MethodInfo getItem;
-                if (!ReflectionCache.TryGetListAccessors(effects.GetType(), out countProp, out getItem))
+                var config = card?.CardConfig;
+                if (config == null)
                     return 0;
-                if (countProp == null || getItem == null) return 0;
 
-                int total = 0;
-                int count = Convert.ToInt32(countProp.GetValue(effects));
-                for (int i = 0; i < count; i++)
-                {
-                    var effect = getItem.Invoke(effects, new object[] { i });
-                    if (effect == null) continue;
-                    string name = effect.GetType().Name;
-                    if (name == "GainManaEffect" && s_gainAmountProp != null)
-                        total += Convert.ToInt32(s_gainAmountProp.GetValue(effect));
-                    else if (name == "GainManaEqualToCostEffect")
-                        total += getManaCost(card);
-                }
+                var analysis = CardClassifier.GetCachedConfigAnalysis(config);
+                int total = analysis.StaticManaGain;
+                if (analysis.ManaEqualToCostCount > 0)
+                    total += analysis.ManaEqualToCostCount * getManaCost(card);
                 return total;
             }
             catch { return 0; }
@@ -191,31 +291,11 @@ namespace BetterAutoPlay
         {
             try
             {
-                var effects = s_onPlayEffectsProp?.GetValue(card.CardConfig);
-                if (effects == null) return 0;
-
-                PropertyInfo countProp;
-                MethodInfo getItem;
-                if (!ReflectionCache.TryGetListAccessors(effects.GetType(), out countProp, out getItem))
+                var config = card?.CardConfig;
+                if (config == null)
                     return 0;
-                if (countProp == null || getItem == null) return 0;
 
-                int score = 0;
-                int count = Convert.ToInt32(countProp.GetValue(effects));
-                for (int i = 0; i < count; i++)
-                {
-                    var effect = getItem.Invoke(effects, new object[] { i });
-                    if (effect == null) continue;
-
-                    string name = effect.GetType().Name;
-                    if (name.IndexOf("Draw", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        name.IndexOf("CardDraw", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        name.IndexOf("AddCard", StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        score += 1;
-                    }
-                }
-                return score;
+                return CardClassifier.GetCachedConfigAnalysis(config).DrawScore;
             }
             catch { return 0; }
         }
@@ -227,7 +307,8 @@ namespace BetterAutoPlay
             beam.Add(new BeamState(new List<CardModel>(), startRemaining, EvaluateBeamScore(player, new List<CardModel>(), startRemaining, context)));
 
             int targetCount = startRemaining.Count;
-            for (int depth = 0; depth < targetCount; depth++)
+            int searchDepth = Math.Min(targetCount, MaxComboSearchDepth);
+            for (int depth = 0; depth < searchDepth; depth++)
             {
                 var expanded = new List<BeamState>();
                 foreach (var state in beam)
@@ -377,8 +458,8 @@ namespace BetterAutoPlay
 
             if (previous != null)
             {
-                bool leftCombo = CanComboAfter(left, previous);
-                bool rightCombo = CanComboAfter(right, previous);
+                bool leftCombo = CanComboAfter(left, previous, context);
+                bool rightCombo = CanComboAfter(right, previous, context);
                 if (leftCombo != rightCombo)
                     return leftCombo ? -1 : 1;
             }
@@ -425,7 +506,7 @@ namespace BetterAutoPlay
             {
                 if (card == null)
                     continue;
-                if (SafeMana(GetManaCost(card, context)) > previousMana && CanComboAfter(card, previous))
+                if (SafeMana(GetManaCost(card, context)) > previousMana && CanComboAfter(card, previous, context))
                 {
                     hasHigherCombo = true;
                     break;
@@ -443,7 +524,7 @@ namespace BetterAutoPlay
                 if (card == null)
                     continue;
 
-                bool isHigherCombo = SafeMana(GetManaCost(card, context)) > previousMana && CanComboAfter(card, previous);
+                bool isHigherCombo = SafeMana(GetManaCost(card, context)) > previousMana && CanComboAfter(card, previous, context);
                 if (isHigherCombo || IsCriticalUtilityCard(card, context))
                     candidates.Add(card);
             }
@@ -481,7 +562,7 @@ namespace BetterAutoPlay
                         score.ComboScore += 3000;
                     score.LowStartScore += Math.Max(0, 50 - mana) * 120;
                 }
-                else if (CanComboAfter(card, previous))
+                else if (CanComboAfter(card, previous, context))
                 {
                     int previousMana = SafeMana(GetManaCost(previous, context));
                     int delta = mana - previousMana;
@@ -558,7 +639,7 @@ namespace BetterAutoPlay
                     continue;
                 if (SafeMana(GetManaCost(card, context)) != selectedMana)
                     continue;
-                if (previous != null && !CanComboAfter(card, previous))
+                if (previous != null && !CanComboAfter(card, previous, context))
                     continue;
                 if (previous == null && !IsComparableStartCandidate(card, selected, context))
                     continue;
@@ -625,7 +706,7 @@ namespace BetterAutoPlay
                     if (card == null)
                         continue;
 
-                    if (CanComboAfter(card, last))
+                    if (CanComboAfter(card, last, context))
                     {
                         int lastMana = SafeMana(GetManaCost(last, context));
                         int mana = SafeMana(GetManaCost(card, context));
@@ -662,8 +743,8 @@ namespace BetterAutoPlay
             int r;
             if (previous != null)
             {
-                bool leftCombo = CanComboAfter(left, previous);
-                bool rightCombo = CanComboAfter(right, previous);
+                bool leftCombo = CanComboAfter(left, previous, context);
+                bool rightCombo = CanComboAfter(right, previous, context);
                 if (leftCombo != rightCombo)
                     return leftCombo ? -1 : 1;
 
@@ -722,7 +803,7 @@ namespace BetterAutoPlay
             {
                 if (other == null || ReferenceEquals(other, card))
                     continue;
-                if (SafeMana(GetManaCost(other, context)) > mana && CanComboAfter(other, card))
+                if (SafeMana(GetManaCost(other, context)) > mana && CanComboAfter(other, card, context))
                     return true;
             }
 
@@ -787,9 +868,15 @@ namespace BetterAutoPlay
             return card != null && context.InComboNow.TryGetValue(card, out value) && value;
         }
 
-        private static bool CanComboAfter(CardModel card, CardModel previous)
+        private static bool CanComboAfter(CardModel card, CardModel previous, AutoPlaySortContext context)
         {
             if (card == null || previous == null) return false;
+            if (context != null && context.ComboPairs != null)
+            {
+                var key = MakeComboPairKey(previous, card);
+                if (key.PreviousPtr != 0 && key.CardPtr != 0 && context.ComboPairs.Contains(key))
+                    return true;
+            }
             try { return card.CanCardCostTypeCombo(previous); }
             catch { return false; }
         }
@@ -927,6 +1014,236 @@ namespace BetterAutoPlay
             }
             catch { return false; }
             return false;
+        }
+
+        private static void ResetTurnFacts()
+        {
+            s_turnPrepared = false;
+            s_turnPreparedPlayer = null;
+            s_turnFactsByPtr.Clear();
+            s_turnComboPairs.Clear();
+        }
+
+        private static void PrepareTurnFacts(PlayerModel player)
+        {
+            if (player == null)
+                return;
+
+            var cards = CollectTurnCards(player);
+            if (cards.Count == 0)
+                return;
+
+            s_turnPreparedPlayer = player;
+            for (int i = 0; i < cards.Count; i++)
+            {
+                AddCardToTurnFacts(player, cards[i]);
+            }
+
+            s_turnPrepared = true;
+            DevLog.Info("PrepareTurnFacts: cached " + s_turnFactsByPtr.Count + " cards, comboPairs=" + s_turnComboPairs.Count);
+        }
+
+        private static void AddCardToTurnFacts(PlayerModel player, CardModel card)
+        {
+            long ptr = GetCardPtr(card);
+            if (ptr == 0)
+                return;
+
+            if (!s_turnFactsByPtr.ContainsKey(ptr))
+                s_turnFactsByPtr[ptr] = BuildFallbackTurnFacts(player, card);
+
+            var existingPtrs = new List<long>(s_turnFactsByPtr.Keys);
+            for (int i = 0; i < existingPtrs.Count; i++)
+            {
+                long otherPtr = existingPtrs[i];
+                if (otherPtr == 0 || otherPtr == ptr)
+                    continue;
+
+                CardModel otherCard = FindCardByPtr(player, otherPtr);
+                if (otherCard == null)
+                    continue;
+
+                try
+                {
+                    if (card.CanCardCostTypeCombo(otherCard))
+                        s_turnComboPairs.Add(MakeComboPairKey(otherPtr, ptr));
+                }
+                catch { }
+
+                try
+                {
+                    if (otherCard.CanCardCostTypeCombo(card))
+                        s_turnComboPairs.Add(MakeComboPairKey(ptr, otherPtr));
+                }
+                catch { }
+            }
+        }
+
+        private static List<CardModel> CollectTurnCards(PlayerModel player)
+        {
+            var cards = new List<CardModel>();
+            var seenPtrs = new HashSet<long>();
+            if (player == null)
+                return cards;
+
+            for (int i = 0; i < s_turnPileMemberNames.Length; i++)
+                AppendCardsFromMember(player, s_turnPileMemberNames[i], cards, seenPtrs);
+
+            if (cards.Count == 0)
+            {
+                var fallback = LiveHandCache.Get();
+                if (fallback != null)
+                {
+                    for (int i = 0; i < fallback.Count; i++)
+                        AddUniqueCard(cards, seenPtrs, fallback[i]);
+                }
+            }
+
+            return cards;
+        }
+
+        private static void AppendCardsFromMember(object target, string memberName, List<CardModel> cards, HashSet<long> seenPtrs)
+        {
+            object pile;
+            if (!TryReadMemberValue(target, memberName, out pile) || pile == null)
+                return;
+
+            object cardPile;
+            if (TryReadMemberValue(pile, "CardPile", out cardPile) && cardPile != null)
+                AppendCardsFromPileObject(cardPile, cards, seenPtrs);
+            else
+                AppendCardsFromPileObject(pile, cards, seenPtrs);
+        }
+
+        private static void AppendCardsFromPileObject(object pile, List<CardModel> cards, HashSet<long> seenPtrs)
+        {
+            if (pile == null)
+                return;
+
+            try
+            {
+                Type type = pile.GetType();
+                var countProp = type.GetProperty("Count");
+                var tryPeekIndexMethod = type.GetMethod("TryPeekIndex");
+                if (countProp != null && tryPeekIndexMethod != null)
+                {
+                    int count = Convert.ToInt32(countProp.GetValue(pile, null));
+                    for (int i = 0; i < count; i++)
+                    {
+                        object[] args = new object[] { i, null };
+                        bool ok = Convert.ToBoolean(tryPeekIndexMethod.Invoke(pile, args));
+                        if (ok)
+                            AddUniqueCard(cards, seenPtrs, args[1] as CardModel);
+                    }
+                    return;
+                }
+            }
+            catch { }
+
+            try
+            {
+                var managed = Il2CppListAdapter.ToManaged(pile);
+                for (int i = 0; i < managed.Count; i++)
+                    AddUniqueCard(cards, seenPtrs, managed[i]);
+            }
+            catch { }
+        }
+
+        private static void AddUniqueCard(List<CardModel> cards, HashSet<long> seenPtrs, CardModel card)
+        {
+            long ptr = GetCardPtr(card);
+            if (ptr == 0 || !seenPtrs.Add(ptr))
+                return;
+
+            cards.Add(card);
+        }
+
+        private static bool TryReadMemberValue(object target, string memberName, out object value)
+        {
+            value = null;
+            if (target == null || string.IsNullOrEmpty(memberName))
+                return false;
+
+            try
+            {
+                PropertyInfo property;
+                FieldInfo field;
+                if (!ReflectionCache.TryGetMemberAccessors(target.GetType(), memberName, out property, out field))
+                    return false;
+
+                if (property != null)
+                {
+                    value = property.GetValue(target, null);
+                    return true;
+                }
+
+                if (field != null)
+                {
+                    value = field.GetValue(target);
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryGetTurnFacts(CardModel card, out TurnCardFacts facts)
+        {
+            facts = default;
+            long ptr = GetCardPtr(card);
+            return ptr != 0 && s_turnFactsByPtr.TryGetValue(ptr, out facts);
+        }
+
+        private static TurnCardFacts BuildFallbackTurnFacts(PlayerModel player, CardModel card)
+        {
+            var facts = new TurnCardFacts();
+            if (card == null)
+                return facts;
+
+            facts.Role = CardClassifier.Classify(card);
+            facts.ManaGain = ComputeManaGain(card, ComputeRawManaCost);
+            facts.DrawScore = ComputeDrawScore(card);
+            facts.ManaCost = ComputeRawManaCost(card);
+            facts.ComboCost = ComputeRawComboCost(card);
+            try { facts.Evolved = card.IsEvolved; } catch { facts.Evolved = false; }
+            facts.InComboNow = ComputeIsCurrentlyInCombo(player, card);
+            return facts;
+        }
+
+        private static long GetCardPtr(CardModel card)
+        {
+            if (card == null)
+                return 0;
+
+            try { return card.Pointer.ToInt64(); }
+            catch { return 0; }
+        }
+
+        private static CardModel FindCardByPtr(PlayerModel player, long ptr)
+        {
+            if (ptr == 0)
+                return null;
+
+            var cards = CollectTurnCards(player);
+            for (int i = 0; i < cards.Count; i++)
+            {
+                var card = cards[i];
+                if (GetCardPtr(card) == ptr)
+                    return card;
+            }
+
+            return null;
+        }
+
+        private static ComboPairKey MakeComboPairKey(CardModel previous, CardModel card)
+        {
+            return MakeComboPairKey(GetCardPtr(previous), GetCardPtr(card));
+        }
+
+        private static ComboPairKey MakeComboPairKey(long previousPtr, long cardPtr)
+        {
+            return new ComboPairKey(previousPtr, cardPtr);
         }
 
         private static Dictionary<CardModel, int> BuildOriginalIndex(List<CardModel> input)
