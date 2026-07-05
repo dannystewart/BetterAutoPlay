@@ -77,6 +77,29 @@ namespace BetterAutoPlay
         private static bool s_loggedGlobalTmpDissolveProbe;
 
         private const float OverlayRowHeight = 22f;
+        private const float OverlayPanelWidth = 300f;
+        private const float OverlayPanelHeight = 420f;
+        private const float OverlayPanelOffsetX = -80f;
+        private const float OverlayPanelOffsetY = 0f;
+        private const float OverlayPanelGapAboveButton = 8f;
+        private const float OverlayPaddingX = 12f;
+        private const float OverlayTitleTop = 10f;
+        private const float OverlayTitleHeight = 30f;
+        private const float OverlayDividerY = 43f;
+        private const float OverlayHeaderTop = 50f;
+        private const float OverlayHeaderHeight = 17f;
+        private const float OverlayContentTop = 68f;
+        private const float OverlayContentBottom = 10f;
+        private const float OverlayIndexX = 0f;
+        private const float OverlayIndexWidth = 24f;
+        private const float OverlayNameX = 30f;
+        private const float OverlayNameWidth = 116f;
+        private const float OverlayRoleX = 152f;
+        private const float OverlayRoleWidth = 72f;
+        private const float OverlayCostX = 228f;
+        private const float OverlayCostWidth = 24f;
+        private const float OverlayManaIconX = 260f;
+        private const float OverlayManaIconSize = 15f;
         private const float OverlayRowExitDissolveDurationSeconds = 0.28f;
         private const float OverlayRowEnterDissolveDurationSeconds = 0.40f;
         private const int OverlaySortingOrder = 32767;
@@ -495,13 +518,12 @@ namespace BetterAutoPlay
             var panelGo = new GameObject("BAPOrderPanel");
             panelGo.transform.SetParent(buttonParent, false);
 
-            float panelH = 500f;
             var rt = panelGo.AddComponent<RectTransform>();
             rt.anchorMin = new Vector2(0.5f, 0.5f);
             rt.anchorMax = new Vector2(0.5f, 0.5f);
             rt.pivot = new Vector2(0.5f, 0.5f);
-            rt.sizeDelta = new Vector2(380f, panelH);
-            rt.anchoredPosition = new Vector2(6f, buttonHeight * 0.5f + panelH * 0.5f + 8f);
+            rt.sizeDelta = new Vector2(OverlayPanelWidth, OverlayPanelHeight);
+            rt.anchoredPosition = new Vector2(OverlayPanelOffsetX, buttonHeight * 0.5f + OverlayPanelHeight * 0.5f + OverlayPanelGapAboveButton + OverlayPanelOffsetY);
 
             Transform topCanvas = FindCanvasTransform(buttonParent);
             panelGo.transform.SetParent(topCanvas, true);
@@ -566,8 +588,8 @@ namespace BetterAutoPlay
             titleRt.anchorMin = new Vector2(0f, 1f);
             titleRt.anchorMax = new Vector2(1f, 1f);
             titleRt.pivot = new Vector2(0.5f, 1f);
-            titleRt.offsetMin = new Vector2(14f, -44f);
-            titleRt.offsetMax = new Vector2(-14f, -10f);
+            titleRt.offsetMin = new Vector2(OverlayPaddingX, -(OverlayTitleTop + OverlayTitleHeight));
+            titleRt.offsetMax = new Vector2(-OverlayPaddingX, -OverlayTitleTop);
             var titleText = titleGo.AddComponent<TextMeshProUGUI>();
             if (gameFont != null) titleText.font = gameFont;
             titleText.text = "PLAY ORDER";
@@ -584,25 +606,25 @@ namespace BetterAutoPlay
             divRt.anchorMin = new Vector2(0f, 1f);
             divRt.anchorMax = new Vector2(1f, 1f);
             divRt.pivot = new Vector2(0.5f, 1f);
-            divRt.offsetMin = new Vector2(12f, -47f);
-            divRt.offsetMax = new Vector2(-12f, -45f);
+            divRt.offsetMin = new Vector2(OverlayPaddingX, -(OverlayDividerY + 2f));
+            divRt.offsetMax = new Vector2(-OverlayPaddingX, -OverlayDividerY);
             var divImg = divGo.AddComponent<Image>();
             divImg.color = new Color(0.9f, 0.82f, 0.55f, 0.35f);
 
             // Column headers
-            // Row layout: Index x=0 w=28 | Name x=34 w=164 | Tag x=202 w=82 | Mana x=286 w=26 | Icon x=318
+            // Row layout is controlled by the Overlay* constants near the top of this file.
             var headerRowGo = new GameObject("ColHeaders");
             headerRowGo.transform.SetParent(panelGo.transform, false);
             var headerRowRt = headerRowGo.AddComponent<RectTransform>();
             headerRowRt.anchorMin = new Vector2(0f, 1f);
             headerRowRt.anchorMax = new Vector2(1f, 1f);
             headerRowRt.pivot = new Vector2(0f, 1f);
-            headerRowRt.offsetMin = new Vector2(14f, -66f);
-            headerRowRt.offsetMax = new Vector2(-14f, -49f);
-            CreateHeaderCell(headerRowGo.transform, "#",    0f,   28f, TextAlignmentOptions.MidlineRight, gameFont);
-            CreateHeaderCell(headerRowGo.transform, "Name", 34f, 164f, TextAlignmentOptions.MidlineLeft,  gameFont);
-            CreateHeaderCell(headerRowGo.transform, "Role", 202f, 82f, TextAlignmentOptions.MidlineLeft,  gameFont);
-            CreateHeaderCell(headerRowGo.transform, "Cost", 286f, 26f, TextAlignmentOptions.MidlineRight, gameFont);
+            headerRowRt.offsetMin = new Vector2(OverlayPaddingX, -(OverlayHeaderTop + OverlayHeaderHeight));
+            headerRowRt.offsetMax = new Vector2(-OverlayPaddingX, -OverlayHeaderTop);
+            CreateHeaderCell(headerRowGo.transform, "#",    OverlayIndexX, OverlayIndexWidth, TextAlignmentOptions.MidlineRight, gameFont);
+            CreateHeaderCell(headerRowGo.transform, "Name", OverlayNameX,  OverlayNameWidth,  TextAlignmentOptions.MidlineLeft,  gameFont);
+            CreateHeaderCell(headerRowGo.transform, "Role", OverlayRoleX,  OverlayRoleWidth,  TextAlignmentOptions.MidlineLeft,  gameFont);
+            CreateHeaderCell(headerRowGo.transform, "Cost", OverlayCostX,  OverlayCostWidth,  TextAlignmentOptions.MidlineRight, gameFont);
 
             // Content area (rows start below header)
             var contentGo = new GameObject("Content");
@@ -610,8 +632,8 @@ namespace BetterAutoPlay
             var contentRt = contentGo.AddComponent<RectTransform>();
             contentRt.anchorMin = Vector2.zero;
             contentRt.anchorMax = Vector2.one;
-            contentRt.offsetMin = new Vector2(14f, 12f);
-            contentRt.offsetMax = new Vector2(-14f, -68f);
+            contentRt.offsetMin = new Vector2(OverlayPaddingX, OverlayContentBottom);
+            contentRt.offsetMax = new Vector2(-OverlayPaddingX, -OverlayContentTop);
             s_overlayContentRoot = contentGo;
 
             var emptyGo = new GameObject("EmptyText");
@@ -1097,11 +1119,11 @@ namespace BetterAutoPlay
 
             var row = new OverlayRow();
             row.Root = rowGo;
-            row.IndexText = CreateOverlayRowText(rowGo.transform, "Index", 0f,   28f,  12f, TextAlignmentOptions.MidlineRight);
-            row.NameText  = CreateOverlayRowText(rowGo.transform, "Name",  34f,  164f, 12f, TextAlignmentOptions.MidlineLeft);
-            row.TagText   = CreateOverlayRowText(rowGo.transform, "Tag",   202f, 82f,  11f, TextAlignmentOptions.MidlineLeft);
-            row.ManaText  = CreateOverlayRowText(rowGo.transform, "Mana",  286f, 26f,  12f, TextAlignmentOptions.MidlineRight);
-            row.ManaIcon  = CreateOverlayManaIcon(rowGo.transform, 318f);
+            row.IndexText = CreateOverlayRowText(rowGo.transform, "Index", OverlayIndexX, OverlayIndexWidth, 12f, TextAlignmentOptions.MidlineRight);
+            row.NameText  = CreateOverlayRowText(rowGo.transform, "Name",  OverlayNameX,  OverlayNameWidth,  12f, TextAlignmentOptions.MidlineLeft);
+            row.TagText   = CreateOverlayRowText(rowGo.transform, "Tag",   OverlayRoleX,  OverlayRoleWidth,  11f, TextAlignmentOptions.MidlineLeft);
+            row.ManaText  = CreateOverlayRowText(rowGo.transform, "Mana",  OverlayCostX,  OverlayCostWidth,  12f, TextAlignmentOptions.MidlineRight);
+            row.ManaIcon  = CreateOverlayManaIcon(rowGo.transform, OverlayManaIconX);
             CaptureBaseMaterial(ref row.IndexBaseMaterial, row.IndexText);
             CaptureBaseMaterial(ref row.NameBaseMaterial, row.NameText);
             CaptureBaseMaterial(ref row.TagBaseMaterial, row.TagText);
@@ -1395,7 +1417,7 @@ namespace BetterAutoPlay
             rt.anchorMax = new Vector2(0f, 0.5f);
             rt.pivot = new Vector2(0f, 0.5f);
             rt.anchoredPosition = new Vector2(x, 0f);
-            rt.sizeDelta = new Vector2(15f, 15f);
+            rt.sizeDelta = new Vector2(OverlayManaIconSize, OverlayManaIconSize);
 
             var image = go.AddComponent<Image>();
             image.sprite = GetManaOrbSprite();
