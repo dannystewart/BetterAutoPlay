@@ -477,6 +477,8 @@ namespace BetterAutoPlay
                 return null;
 
             string normalized = value.ToLowerInvariant();
+            if (normalized == "void notlocalised" || normalized == "void notlocalized") return "Wild";
+            if (normalized == "wild" || normalized == "wildcard" || normalized == "wild card") return "Wild";
             if (normalized == "defence" || normalized == "defense") return "Armor";
             if (normalized == "attack")   return "Attack";
             if (normalized == "armor")    return "Armor";
