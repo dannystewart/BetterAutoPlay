@@ -331,6 +331,7 @@ namespace BetterAutoPlay
                     SortOrderCache.MarkPlayed(cardModel);
                     AutoPlayUiController.OnOrderStateChanged(cardModel);
                 }
+                AutoPlayUiController.CompleteAutoPlayIfHandIsDone(__instance);
                 DevLog.Info("TryPlayCard Postfix: SUCCESS card=" + DescribeCard(cardModel) + " -> cooldown cleared");
                 return;
             }

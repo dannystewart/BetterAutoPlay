@@ -158,6 +158,20 @@ namespace BetterAutoPlay
             TryContinueAutoPlay(player, "button postfix");
         }
 
+        public static void CompleteAutoPlayIfHandIsDone(PlayerModel player)
+        {
+            if (player == null || !s_persistentAutoPlayIntent)
+                return;
+
+            bool canKeepPlaying = false;
+            try { canKeepPlaying = player.CanPlayerKeepPlaying(); }
+            catch { }
+            if (canKeepPlaying)
+                return;
+
+            ClearAutoPlayIntent(player, "auto-play hand complete");
+        }
+
         public static void Refresh(PlayerModel player)
         {
             if (player == null)
@@ -774,13 +788,51 @@ namespace BetterAutoPlay
         public static void OnTurnEnded(PlayerModel player)
         {
             ComboManaSorter.OnTurnEnded();
+            ClearAutoPlayIntent(player ?? s_lastPlayer, "turn ended");
             RequestSortOrderRebuild(player, "OnTurnEnded: queued order cache rebuild", true);
         }
 
         public static void OnEncounterDefeated(PlayerModel player)
         {
             ComboManaSorter.OnTurnEnded();
+            ClearAutoPlayIntent(player ?? s_lastPlayer, "encounter defeated");
             RequestSortOrderRebuild(player, "OnEncounterDefeated: queued order cache rebuild", true);
+        }
+
+        private static void ClearAutoPlayIntent(PlayerModel player, string reason)
+        {
+            s_persistentAutoPlayIntent = false;
+            s_nextResumeAttemptAt = 0f;
+            s_lastResumeSkipReason = null;
+
+            try
+            {
+                if (player != null)
+                    s_autoPlayerStopMethod?.Invoke(player.AutoPlayer, null);
+            }
+            catch { }
+
+            RestoreAutoPlayLabel();
+            DevLog.Info("ClearAutoPlayIntent: reason=" + reason);
+        }
+
+        private static void RestoreAutoPlayLabel()
+        {
+            var label = s_cachedPlayAllLabel;
+            if (label == null)
+                label = s_cachedPlayAllLabelForButton;
+            if (label == null)
+                return;
+
+            try
+            {
+                label.text = s_defaultPlayAllLabelText ?? AutoPlayLabel;
+                label.color = s_defaultPlayAllLabelColor;
+            }
+            catch { }
+
+            s_labelOverridden = false;
+            s_wasShowingAutoPlaying = false;
         }
 
         public static void OnChooseCardModalClosed()
