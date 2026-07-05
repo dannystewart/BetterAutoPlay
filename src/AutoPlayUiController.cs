@@ -14,6 +14,9 @@ namespace BetterAutoPlay
     {
         private const float RainbowHueCyclesPerSecond = 0.35f;
         private const float VisualRefreshIntervalSeconds = 0.05f;
+        private const float OverlayRebuildDelaySeconds = 2.0f;
+        private const float CardAddedOverlayRebuildDelaySeconds = 1.0f;
+        private const float AutoPlayContinuationTimeoutSeconds = 0.6f;
         private const string AutoPlayLabel = "Auto Play";
         private const string AutoPlayingLabel = "Auto Playing";
         private const float NoPlayableCardsBackoffSeconds = 0.5f;
@@ -25,6 +28,10 @@ namespace BetterAutoPlay
         private static float s_nextSkipRepeatLogAt;
         private static float s_nextVisualRefreshAt;
         private static float s_nextOverlayPrewarmAt;
+        private static float s_scheduledOverlayRebuildAt;
+        private static bool s_scheduledOverlayRebuildClearCache;
+        private static float s_autoPlayContinuationTimeoutAt;
+        private static PlayerModel s_autoPlayContinuationPlayer;
         private static bool s_pendingSortOrderRebuild;
         private static TMP_Text s_cachedPlayAllLabel;
         private static string s_defaultPlayAllLabelText;
@@ -33,15 +40,11 @@ namespace BetterAutoPlay
         private static bool s_wasShowingAutoPlaying;
 
         private static readonly MethodInfo s_autoPlayerStopMethod = AccessTools.Method(typeof(AutoPlayer), "StopAutoPlay");
-        private static TMP_Text s_refreshButtonLabel;
 
         // Button images + hover colors for direct color change on pointer enter/exit
         private static Image s_orderButtonImg;
         private static Color s_orderButtonNormal;
         private static Color s_orderButtonHover;
-        private static Image s_refreshButtonImg;
-        private static Color s_refreshButtonNormal;
-        private static Color s_refreshButtonHover;
 
         // Pre-computed overlay colors (avoid per-tick HtmlColor/hex parsing)
         private static readonly Color s_overlayIndexColor    = new Color(0.333f, 0.333f, 0.333f, 1f); // #555555
@@ -53,7 +56,6 @@ namespace BetterAutoPlay
         private static TMP_FontAsset s_gameFont;
         private static Button s_orderButton;
         private static TMP_Text s_orderButtonLabel;
-        private static Button s_refreshButton;
         private static GameObject s_overlayPanel;
         private static GameObject s_overlayContentRoot;
         private static TMP_Text s_overlayContentText;
@@ -120,16 +122,12 @@ namespace BetterAutoPlay
         {
             if (s_orderButton != null && (object)s == (object)s_orderButton)
             { if (s_orderButtonImg != null) s_orderButtonImg.color = s_orderButtonHover; return; }
-            if (s_refreshButton != null && (object)s == (object)s_refreshButton)
-            { if (s_refreshButtonImg != null) s_refreshButtonImg.color = s_refreshButtonHover; }
         }
 
         public static void OnButtonPointerExit(Selectable s)
         {
             if (s_orderButton != null && (object)s == (object)s_orderButton)
             { if (s_orderButtonImg != null) s_orderButtonImg.color = s_orderButtonNormal; return; }
-            if (s_refreshButton != null && (object)s == (object)s_refreshButton)
-            { if (s_refreshButtonImg != null) s_refreshButtonImg.color = s_refreshButtonNormal; }
         }
 
         public static void SyncPersistentToggle(PlayerModel player)
@@ -137,17 +135,15 @@ namespace BetterAutoPlay
             if (player == null)
                 return;
 
-            s_persistentAutoPlayIntent = !s_persistentAutoPlayIntent;
-            s_manualToggleCooldownUntil = Time.realtimeSinceStartup + 0.4f;
-            DevLog.Info("SyncPersistentToggle: intent=" + s_persistentAutoPlayIntent + ", cooldownUntil=" + s_manualToggleCooldownUntil.ToString("F3"));
-
-            if (!s_persistentAutoPlayIntent)
+            if (s_persistentAutoPlayIntent)
             {
-                try { s_autoPlayerStopMethod?.Invoke(player.AutoPlayer, null); }
-                catch { }
-                DevLog.Info("SyncPersistentToggle: StopAutoPlay called immediately");
+                ClearAutoPlayIntent(player, "button toggle off");
                 return;
             }
+
+            s_persistentAutoPlayIntent = true;
+            s_manualToggleCooldownUntil = Time.realtimeSinceStartup + 0.4f;
+            DevLog.Info("SyncPersistentToggle: intent=" + s_persistentAutoPlayIntent + ", cooldownUntil=" + s_manualToggleCooldownUntil.ToString("F3"));
 
             TryContinueAutoPlay(player, "button toggle");
         }
@@ -160,18 +156,43 @@ namespace BetterAutoPlay
             TryContinueAutoPlay(player, "button postfix");
         }
 
-        public static void CompleteAutoPlayIfHandIsDone(PlayerModel player)
+        public static void OnAutoPlayCardSucceeded(PlayerModel player)
         {
             if (player == null || !s_persistentAutoPlayIntent)
                 return;
+
+            s_autoPlayContinuationTimeoutAt = 0f;
+            s_autoPlayContinuationPlayer = null;
+            CancelDelayedSortOrderRebuild();
 
             bool canKeepPlaying = false;
             try { canKeepPlaying = player.CanPlayerKeepPlaying(); }
             catch { }
             if (canKeepPlaying)
+            {
+                ArmAutoPlayContinuationTimeout(player, "card success");
+                TryContinueAutoPlay(player, "card success");
                 return;
+            }
 
             ClearAutoPlayIntent(player, "auto-play hand complete");
+            ScheduleDelayedSortOrderRebuild(player, "auto-play wave complete: scheduled delayed order cache rebuild", true);
+        }
+
+        public static void OnCardAddedToHand(PlayerModel player)
+        {
+            if (player == null)
+                return;
+
+            ScheduleDelayedSortOrderRebuild(player, "card added to hand: scheduled delayed order cache rebuild", true, CardAddedOverlayRebuildDelaySeconds);
+        }
+
+        public static void OnManualCardPlayed(PlayerModel player)
+        {
+            if (player == null)
+                return;
+
+            ScheduleDelayedSortOrderRebuild(player, "manual card played: scheduled delayed order cache rebuild", true, CardAddedOverlayRebuildDelaySeconds);
         }
 
         public static void Refresh(PlayerModel player)
@@ -179,6 +200,8 @@ namespace BetterAutoPlay
             if (player == null)
                 return;
             s_lastPlayer = player;
+            TryProcessAutoPlayContinuationTimeout();
+            TryProcessScheduledSortOrderRebuild();
             if (s_overlayOpen)
                 TryProcessPendingSortOrderRebuild(player);
 
@@ -215,14 +238,10 @@ namespace BetterAutoPlay
             string wantedOrderLabel = s_overlayOpen ? "Close" : "Order";
             if (s_orderButtonLabel != null && s_orderButtonLabel.text != wantedOrderLabel)
                 s_orderButtonLabel.text = wantedOrderLabel;
-            if (s_refreshButtonLabel != null && s_refreshButtonLabel.text != "Refresh")
-                s_refreshButtonLabel.text = "Refresh";
 
             // Keep our cloned buttons always interactable — game components on the clone may disable them.
             if (s_orderButton != null)
                 try { if (!s_orderButton.interactable) s_orderButton.interactable = true; } catch { }
-            if (s_refreshButton != null)
-                try { if (!s_refreshButton.interactable) s_refreshButton.interactable = true; } catch { }
 
 
             if (s_cachedPlayAllLabel != label)
@@ -233,17 +252,11 @@ namespace BetterAutoPlay
                 s_labelOverridden = false;
             }
 
-            bool isPlaying = false;
-            try
-            {
-                isPlaying = player.AutoPlayer != null && player.AutoPlayer.IsPlaying;
-            }
-            catch { }
             bool canActNow = false;
             try { canActNow = button != null && button.interactable; }
             catch { }
 
-            bool shouldShowAutoPlaying = canActNow && (isPlaying || s_persistentAutoPlayIntent);
+            bool shouldShowAutoPlaying = canActNow && s_persistentAutoPlayIntent;
             if (shouldShowAutoPlaying)
             {
                 if (!string.Equals(label.text, AutoPlayingLabel, StringComparison.Ordinal))
@@ -373,12 +386,20 @@ namespace BetterAutoPlay
                     return;
 
                 DevLog.Info("TryContinueAutoPlay: calling AutoPlayer.Play(), reason=" + reason);
+                ArmAutoPlayContinuationTimeout(player, reason);
                 player.AutoPlayer.Play();
             }
             catch (Exception ex)
             {
                 BetterAutoPlayPlugin.LogSource?.LogWarning("[BAP] Auto-play continuation failed: " + ex.Message);
             }
+        }
+
+        private static void ArmAutoPlayContinuationTimeout(PlayerModel player, string reason)
+        {
+            s_autoPlayContinuationPlayer = player;
+            s_autoPlayContinuationTimeoutAt = Time.realtimeSinceStartup + AutoPlayContinuationTimeoutSeconds;
+            DevLog.Info("ArmAutoPlayContinuationTimeout: reason=" + reason + ", timeoutAt=" + s_autoPlayContinuationTimeoutAt.ToString("F3"));
         }
 
         private static void EnsureOrderButton(Button playAllButton)
@@ -393,10 +414,7 @@ namespace BetterAutoPlay
                     try { GameObject.Destroy(s_overlayPanel); } catch { }
                 s_orderButton = null;
                 s_orderButtonLabel = null;
-                s_refreshButton = null;
-                s_refreshButtonLabel = null;
                 s_orderButtonImg = null;
-                s_refreshButtonImg = null;
                 s_overlayPanel = null;
                 s_overlayContentRoot = null;
                 s_overlayContentText = null;
@@ -559,35 +577,6 @@ namespace BetterAutoPlay
             titleText.color = new Color(0.9f, 0.82f, 0.55f, 1f);
             titleText.characterSpacing = 3f;
 
-            // Refresh button — clone PlayAll so hover/sound/style are inherited automatically
-            var refreshGo = GameObject.Instantiate(playAllButton.gameObject);
-            refreshGo.name = "BAPRefreshButton";
-            refreshGo.transform.SetParent(panelGo.transform, false);
-            var refreshRt = refreshGo.GetComponent<RectTransform>();
-            refreshRt.anchorMin = new Vector2(1f, 1f);
-            refreshRt.anchorMax = new Vector2(1f, 1f);
-            refreshRt.pivot     = new Vector2(1f, 1f);
-            refreshRt.sizeDelta = new Vector2(84f, 34f);
-            refreshRt.anchoredPosition = new Vector2(-8f, -10f);
-
-            s_refreshButton = refreshGo.GetComponent<Button>();
-            s_refreshButton.onClick.RemoveAllListeners();
-            s_refreshButton.onClick.AddListener(new System.Action(OnRefreshClicked));
-
-            s_refreshButtonImg = refreshGo.GetComponent<Image>();
-            var cb2 = s_refreshButton.colors;
-            s_refreshButtonNormal = cb2.normalColor * cb2.colorMultiplier;
-            s_refreshButtonHover  = cb2.highlightedColor * cb2.colorMultiplier;
-
-            s_refreshButtonLabel = refreshGo.GetComponentInChildren<TMP_Text>();
-            if (s_refreshButtonLabel != null)
-            {
-                s_refreshButtonLabel.text             = "Refresh";
-                s_refreshButtonLabel.enableAutoSizing = false;
-                s_refreshButtonLabel.fontSize         = 9f;
-                s_refreshButtonLabel.alignment        = TextAlignmentOptions.Center;
-            }
-
             // Divider line under title
             var divGo = new GameObject("Divider");
             divGo.transform.SetParent(panelGo.transform, false);
@@ -664,14 +653,6 @@ namespace BetterAutoPlay
             }
         }
 
-        private static void OnRefreshClicked()
-        {
-            DevLog.Info("OnRefreshClicked: rebuilding overlay sort cache");
-            s_pendingSortOrderRebuild = true;
-            TryProcessPendingSortOrderRebuild(s_lastPlayer);
-            UpdateOverlayContent();
-        }
-
         private static bool RebuildSortOrderFromCurrentHand()
         {
             if (s_lastPlayer == null) return false;
@@ -740,6 +721,75 @@ namespace BetterAutoPlay
         private static void InvalidateOverlayRefreshState()
         {
             s_lastHandFingerprint = 0;
+        }
+
+        private static void ScheduleDelayedSortOrderRebuild(PlayerModel player, string reason, bool clearCacheFirst)
+        {
+            ScheduleDelayedSortOrderRebuild(player, reason, clearCacheFirst, OverlayRebuildDelaySeconds);
+        }
+
+        private static void ScheduleDelayedSortOrderRebuild(PlayerModel player, string reason, bool clearCacheFirst, float delaySeconds)
+        {
+            if (player != null)
+                s_lastPlayer = player;
+
+            s_scheduledOverlayRebuildAt = Time.realtimeSinceStartup + delaySeconds;
+            s_scheduledOverlayRebuildClearCache = clearCacheFirst;
+            DevLog.Info(reason + ", delay=" + delaySeconds.ToString("F1") + "s");
+        }
+
+        private static void CancelDelayedSortOrderRebuild()
+        {
+            s_scheduledOverlayRebuildAt = 0f;
+            s_scheduledOverlayRebuildClearCache = false;
+        }
+
+        private static void TryProcessScheduledSortOrderRebuild()
+        {
+            if (s_scheduledOverlayRebuildAt <= 0f)
+                return;
+
+            if (Time.realtimeSinceStartup < s_scheduledOverlayRebuildAt)
+                return;
+
+            if (!IsReadyForOverlayRebuild(s_lastPlayer))
+            {
+                s_scheduledOverlayRebuildAt = Time.realtimeSinceStartup + 0.25f;
+                return;
+            }
+
+            bool clearCacheFirst = s_scheduledOverlayRebuildClearCache;
+            s_scheduledOverlayRebuildAt = 0f;
+            s_scheduledOverlayRebuildClearCache = false;
+
+            InvalidateOverlayRefreshState();
+            if (clearCacheFirst)
+                SortOrderCache.Reset();
+            s_pendingSortOrderRebuild = true;
+            DevLog.Info("TryProcessScheduledSortOrderRebuild: delay elapsed, rebuilding order cache");
+        }
+
+        private static bool IsReadyForOverlayRebuild(PlayerModel player)
+        {
+            if (player == null)
+                return false;
+
+            try
+            {
+                if (player.AutoPlayer != null && player.AutoPlayer.IsPlaying)
+                    return false;
+            }
+            catch { }
+
+            try
+            {
+                var button = player.PlayAllButton;
+                if (button != null && !button.interactable)
+                    return false;
+            }
+            catch { }
+
+            return true;
         }
 
         private static void RequestSortOrderRebuild(PlayerModel player, string reason, bool clearCacheFirst)
@@ -860,6 +910,8 @@ namespace BetterAutoPlay
             s_persistentAutoPlayIntent = false;
             s_nextResumeAttemptAt = 0f;
             s_lastResumeSkipReason = null;
+            s_autoPlayContinuationTimeoutAt = 0f;
+            s_autoPlayContinuationPlayer = null;
 
             try
             {
@@ -870,6 +922,19 @@ namespace BetterAutoPlay
 
             RestoreAutoPlayLabel();
             DevLog.Info("ClearAutoPlayIntent: reason=" + reason);
+        }
+
+        private static void TryProcessAutoPlayContinuationTimeout()
+        {
+            if (!s_persistentAutoPlayIntent || s_autoPlayContinuationTimeoutAt <= 0f)
+                return;
+
+            if (Time.realtimeSinceStartup < s_autoPlayContinuationTimeoutAt)
+                return;
+
+            var player = s_autoPlayContinuationPlayer ?? s_lastPlayer;
+            ClearAutoPlayIntent(player, "auto-play continuation timed out");
+            ScheduleDelayedSortOrderRebuild(player, "auto-play lull: scheduled delayed order cache rebuild", true);
         }
 
         private static void RestoreAutoPlayLabel()

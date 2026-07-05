@@ -108,6 +108,7 @@ namespace BetterAutoPlay
                     return;
 
                 ComboManaSorter.OnCardAddedToHand(playerModel, cardModel);
+                AutoPlayUiController.OnCardAddedToHand(playerModel);
             }
             catch { }
         }
@@ -319,7 +320,15 @@ namespace BetterAutoPlay
         private static void Postfix(PlayerModel __instance, CardModel cardModel, bool isAutoPlay, bool __result, bool __state)
         {
             if (!isAutoPlay)
+            {
+                if (__result && AutoPlayUiController.IsOrderOverlayOpen())
+                {
+                    SortOrderCache.MarkPlayed(cardModel);
+                    AutoPlayUiController.OnOrderStateChanged(cardModel);
+                    AutoPlayUiController.OnManualCardPlayed(__instance);
+                }
                 return;
+            }
 
             bool orderOverlayOpen = AutoPlayUiController.IsOrderOverlayOpen();
 
@@ -331,7 +340,7 @@ namespace BetterAutoPlay
                     SortOrderCache.MarkPlayed(cardModel);
                     AutoPlayUiController.OnOrderStateChanged(cardModel);
                 }
-                AutoPlayUiController.CompleteAutoPlayIfHandIsDone(__instance);
+                AutoPlayUiController.OnAutoPlayCardSucceeded(__instance);
                 DevLog.Info("TryPlayCard Postfix: SUCCESS card=" + DescribeCard(cardModel) + " -> cooldown cleared");
                 return;
             }
