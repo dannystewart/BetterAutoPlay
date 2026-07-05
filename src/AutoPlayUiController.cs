@@ -58,6 +58,8 @@ namespace BetterAutoPlay
         private static GameObject s_overlayContentRoot;
         private static TMP_Text s_overlayContentText;
         private static bool s_overlayOpen;
+        private static bool s_restoreOverlayWhenAvailable;
+        private static bool s_playAllButtonAvailable;
         private static bool s_orderButtonCreated;
         private static Button s_lastSeenPlayAllButton;
         private static TMP_Text s_cachedPlayAllLabelForButton;
@@ -185,11 +187,17 @@ namespace BetterAutoPlay
 
             if (button == null)
             {
+                s_playAllButtonAvailable = false;
+                CloseOrderOverlay("PlayAll button missing");
                 DevLog.Info("Refresh: PlayAll button is null, skipping visual update");
                 return;
             }
 
+            bool buttonJustAppeared = !s_playAllButtonAvailable;
+            s_playAllButtonAvailable = true;
             EnsureOrderButton(button);
+            if (buttonJustAppeared)
+                RestoreOrderOverlayIfRequested("button appeared");
 
             TMP_Text label = s_cachedPlayAllLabelForButton;
             if (s_lastSeenPlayAllButton != button || label == null)
@@ -638,6 +646,7 @@ namespace BetterAutoPlay
         private static void ToggleOverlay()
         {
             s_overlayOpen = !s_overlayOpen;
+            s_restoreOverlayWhenAvailable = s_overlayOpen;
             DevLog.Info("ToggleOverlay: open=" + s_overlayOpen);
 
             if (s_overlayPanel != null)
@@ -782,6 +791,7 @@ namespace BetterAutoPlay
         public static void OnTurnStarted(PlayerModel player)
         {
             ComboManaSorter.OnTurnStarted(player ?? s_lastPlayer);
+            RestoreOrderOverlayIfRequested("turn started");
             RequestSortOrderRebuild(player, "OnTurnStarted: queued order cache rebuild", true);
         }
 
@@ -796,7 +806,53 @@ namespace BetterAutoPlay
         {
             ComboManaSorter.OnTurnEnded();
             ClearAutoPlayIntent(player ?? s_lastPlayer, "encounter defeated");
+            CloseOrderOverlay("encounter defeated");
             RequestSortOrderRebuild(player, "OnEncounterDefeated: queued order cache rebuild", true);
+        }
+
+        private static void CloseOrderOverlay(string reason)
+        {
+            if (!s_overlayOpen)
+                return;
+
+            s_overlayOpen = false;
+            if (s_overlayPanel != null)
+            {
+                try { s_overlayPanel.SetActive(false); }
+                catch { }
+            }
+            if (s_orderButtonLabel != null)
+            {
+                try { s_orderButtonLabel.text = "Order"; }
+                catch { }
+            }
+            DevLog.Info("CloseOrderOverlay: reason=" + reason);
+        }
+
+        private static void RestoreOrderOverlayIfRequested(string reason)
+        {
+            if (!s_restoreOverlayWhenAvailable || s_overlayOpen || s_overlayPanel == null)
+                return;
+
+            s_overlayOpen = true;
+            try { s_overlayPanel.SetActive(true); }
+            catch { }
+            if (s_orderButtonLabel != null)
+            {
+                try { s_orderButtonLabel.text = "Close"; }
+                catch { }
+            }
+
+            try
+            {
+                if (s_dissolveTextMaterialTemplate == null && !s_attemptedDissolveTextMaterialCapture)
+                    TryCaptureDissolveTextMaterialTemplate();
+                EnsureSortOrderReadyForOverlay();
+                UpdateOverlayContent();
+            }
+            catch { }
+
+            DevLog.Info("RestoreOrderOverlayIfRequested: restored open state, reason=" + reason);
         }
 
         private static void ClearAutoPlayIntent(PlayerModel player, string reason)
