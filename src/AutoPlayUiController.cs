@@ -144,7 +144,18 @@ namespace BetterAutoPlay
                 try { s_autoPlayerStopMethod?.Invoke(player.AutoPlayer, null); }
                 catch { }
                 DevLog.Info("SyncPersistentToggle: StopAutoPlay called immediately");
+                return;
             }
+
+            TryContinueAutoPlay(player, "button toggle");
+        }
+
+        public static void ContinueAutoPlayFromButton(PlayerModel player)
+        {
+            if (player == null || !s_persistentAutoPlayIntent)
+                return;
+
+            TryContinueAutoPlay(player, "button postfix");
         }
 
         public static void Refresh(PlayerModel player)
@@ -324,6 +335,28 @@ namespace BetterAutoPlay
                 player.AutoPlayer?.Play();
             }
             catch { }
+        }
+
+        private static void TryContinueAutoPlay(PlayerModel player, string reason)
+        {
+            try
+            {
+                if (player.AutoPlayer == null || player.AutoPlayer.IsPlaying)
+                    return;
+
+                bool canKeepPlaying = true;
+                try { canKeepPlaying = player.CanPlayerKeepPlaying(); }
+                catch { }
+                if (!canKeepPlaying)
+                    return;
+
+                DevLog.Info("TryContinueAutoPlay: calling AutoPlayer.Play(), reason=" + reason);
+                player.AutoPlayer.Play();
+            }
+            catch (Exception ex)
+            {
+                BetterAutoPlayPlugin.LogSource?.LogWarning("[BAP] Auto-play continuation failed: " + ex.Message);
+            }
         }
 
         private static void EnsureOrderButton(Button playAllButton)

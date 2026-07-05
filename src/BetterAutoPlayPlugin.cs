@@ -26,12 +26,40 @@ namespace BetterAutoPlay
             LogSource = Log;
             DevLog.Initialize(Log);
             var harmony = new Harmony(PluginGuid);
-            harmony.PatchAll(typeof(BetterAutoPlayPlugin).Assembly);
-            ModalTracker.TryPatchModals(harmony);
-            RewardModalTracker.TryPatchChooseCardModal(harmony);
+
+            PatchHarmonyType(harmony, typeof(AutoPlayerPlayPatch));
+            PatchHarmonyType(harmony, typeof(AutoPlayerSortCardsByComboPatch));
+            PatchHarmonyType(harmony, typeof(PlayerModelUpdateButtonsPatch));
+            PatchHarmonyType(harmony, typeof(SelectablePointerEnterPatch));
+            PatchHarmonyType(harmony, typeof(SelectablePointerExitPatch));
+            PatchHarmonyType(harmony, typeof(PlayerModelButtonAutoPlayPatch));
+            PatchHarmonyType(harmony, typeof(PlayerModelTryPlayCardPatch));
+            PatchHarmonyType(harmony, typeof(PlayerTurnStateOnEnterPatch));
+            PatchHarmonyType(harmony, typeof(PlayerEndTurnStateOnEnterPatch));
+            PatchHarmonyType(harmony, typeof(EncounterDefeatedStateOnEnterPatch));
+
+            LogSource.LogWarning("[BAP] Modal patches disabled; Modal.OnClosed patching stack-overflows on the current game build when combined with SVCU");
             CardViewTracker.TryPatchCardAddedToHand(harmony);
-            IL2CPPChainloader.AddUnityComponent<AutoPlayVisualUpdater>();
+            TryAddVisualUpdater();
             Log.LogInfo(PluginName + " loaded");
+        }
+
+        private static void TryAddVisualUpdater()
+        {
+            LogSource.LogWarning("[BAP] AutoPlayVisualUpdater disabled; BepInEx AddUnityComponent does not return on the current game build");
+        }
+
+        private static void PatchHarmonyType(Harmony harmony, Type patchType)
+        {
+            try
+            {
+                harmony.CreateClassProcessor(patchType).Patch();
+                LogSource.LogInfo("[BAP] Harmony patch applied: " + patchType.Name);
+            }
+            catch (Exception ex)
+            {
+                LogSource.LogWarning("[BAP] Harmony patch failed: " + patchType.Name + " - " + ex);
+            }
         }
     }
 
@@ -266,6 +294,8 @@ namespace BetterAutoPlay
         private static void Postfix(PlayerModel __instance)
         {
             try { AutoPlayUiController.SyncPersistentToggle(__instance); }
+            catch { }
+            try { AutoPlayUiController.ContinueAutoPlayFromButton(__instance); }
             catch { }
             try { AutoPlayUiController.Refresh(__instance); }
             catch { }
