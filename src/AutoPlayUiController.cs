@@ -77,10 +77,11 @@ namespace BetterAutoPlay
         private static bool s_loggedGlobalTmpDissolveProbe;
 
         private const float OverlayRowHeight = 22f;
-        private const float OverlayPanelWidth = 300f;
-        private const float OverlayPanelHeight = 420f;
-        private const float OverlayPanelOffsetX = -80f;
-        private const float OverlayPanelOffsetY = 0f;
+        private const float OverlayPanelWidth = 270f;
+        private const float OverlayPanelHeight = 390f;
+        private const float OverlayPanelScale = 1.4f;
+        private const float OverlayPanelOffsetX = -120f;
+        private const float OverlayPanelOffsetY = 80f;
         private const float OverlayPanelGapAboveButton = 8f;
         private const float OverlayPaddingX = 12f;
         private const float OverlayTitleTop = 10f;
@@ -91,14 +92,14 @@ namespace BetterAutoPlay
         private const float OverlayContentTop = 68f;
         private const float OverlayContentBottom = 10f;
         private const float OverlayIndexX = 0f;
-        private const float OverlayIndexWidth = 24f;
-        private const float OverlayNameX = 30f;
-        private const float OverlayNameWidth = 116f;
-        private const float OverlayRoleX = 152f;
-        private const float OverlayRoleWidth = 72f;
-        private const float OverlayCostX = 228f;
+        private const float OverlayIndexWidth = 12f;
+        private const float OverlayNameX = 20f;
+        private const float OverlayNameWidth = 100f;
+        private const float OverlayRoleX = 140f;
+        private const float OverlayRoleWidth = 48f;
+        private const float OverlayCostX = 190f;
         private const float OverlayCostWidth = 24f;
-        private const float OverlayManaIconX = 260f;
+        private const float OverlayManaIconX = 220f;
         private const float OverlayManaIconSize = 15f;
         private const float OverlayRowExitDissolveDurationSeconds = 0.28f;
         private const float OverlayRowEnterDissolveDurationSeconds = 0.40f;
@@ -517,6 +518,7 @@ namespace BetterAutoPlay
 
             var panelGo = new GameObject("BAPOrderPanel");
             panelGo.transform.SetParent(buttonParent, false);
+            panelGo.transform.localScale = new Vector3(OverlayPanelScale, OverlayPanelScale, 1f);
 
             var rt = panelGo.AddComponent<RectTransform>();
             rt.anchorMin = new Vector2(0.5f, 0.5f);
