@@ -50,6 +50,7 @@ namespace BetterAutoPlay
         private static readonly Color s_overlayIndexColor    = new Color(0.333f, 0.333f, 0.333f, 1f); // #555555
         private static readonly Color s_overlayPlayedColor   = new Color(0.267f, 0.800f, 0.267f, 1f); // #44cc44
         private static readonly Color s_overlayUnAffordColor = new Color(1f, 0.333f, 0.333f, 1f);     // #ff5555
+        private static readonly Color s_overlayManaWarnColor = new Color(1f, 0.800f, 0.267f, 1f);     // #ffcc44
         private static readonly Color s_overlayManaColor     = new Color(0.812f, 0.812f, 0.812f, 1f); // #cfcfcf
 
         // Order overlay
@@ -995,7 +996,7 @@ namespace BetterAutoPlay
             if (!SortOrderCache.TryRefreshEntry(card, out index, out entry))
                 return;
 
-            UpdateOverlayRow(index, entry);
+            UpdateOverlayContent();
         }
 
         private static void UpdateOverlayContent()
@@ -1073,7 +1074,11 @@ namespace BetterAutoPlay
 
             if (row.NameText.text != entry.Name)
                 row.NameText.text = entry.Name;
-            Color nameColor = entry.Played ? s_overlayPlayedColor : (entry.CanAfford ? Color.white : s_overlayUnAffordColor);
+            Color nameColor = entry.Played
+                ? s_overlayPlayedColor
+                : (!entry.CanAfford
+                    ? s_overlayUnAffordColor
+                    : (entry.CumulativeManaExceedsCurrent ? s_overlayManaWarnColor : Color.white));
             if (row.NameText.color != nameColor)
                 row.NameText.color = nameColor;
 
