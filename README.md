@@ -140,7 +140,7 @@ Vampire Crawlers/
 - [.NET SDK 6.0+](https://dotnet.microsoft.com/download)
 - **BepInEx IL2CPP must be installed** (follow Step 1 above)
 - Vampire Crawlers must be installed on Steam
-- [Il2CppDumper](https://github.com/Perfare/Il2CppDumper/releases) - to generate interop DLLs
+- The game must have been launched once through BepInEx so `BepInEx/interop` has been generated
 
 ### Build Steps
 
@@ -150,17 +150,13 @@ Vampire Crawlers/
    cd BetterAutoPlay
    ```
 
-2. **Generate Interop DLLs with Il2CppDumper**:
+2. **Generate BepInEx Interop DLLs**:
 
    > **Why?** Vampire Crawlers is built with IL2CPP. We need to dump the game's DLLs to get type definitions like `CardModel`, `PlayerModel`, etc.
 
-   1. Download [Il2CppDumper](https://github.com/Perfare/Il2CppDumper/releases) (e.g., `Il2CppDumper-win-v6.7.46.zip`)
-   2. Extract it somewhere (e.g., `C:\Il2CppDumper`)
-   3. Run `Il2CppDumper.exe`
-   4. Select file: Navigate to your game folder and select `GameAssembly.dll`
-   5. Select folder: Choose `C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\`
-   6. A new `DummyDLL` folder will be created - rename it to `interop`
-   7. Move `interop` folder into `BepInEx\` (if not already there)
+   Launch Vampire Crawlers once through BepInEx. BepInEx will generate the interop assemblies automatically in `BepInEx/interop`.
+
+   On macOS, install BepInEx using the IL2CPP macOS instructions and launch through `run_bepinex.sh` as described in the BepInEx documentation.
 
    Result should look like:
    ```
@@ -176,12 +172,16 @@ Vampire Crawlers/
 
 3. **Check your Steam path**:
 
-   The project expects the game at:
+   The project has default game paths for Windows and macOS:
    ```
    C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers
+   /Users/danny/Library/Application Support/Steam/steamapps/common/Vampire Crawlers
    ```
 
-   If your game is installed elsewhere, open the `.csproj` file and update all the `HintPath` entries to match your path.
+   If your game is installed elsewhere, pass `GameDir` when building:
+   ```bash
+   dotnet build -c Release -p:GameDir="/path/to/Vampire Crawlers"
+   ```
 
 4. **Build the project**:
    ```bash
@@ -192,6 +192,10 @@ Vampire Crawlers/
    ```bash
    # Windows (PowerShell)
    Copy-Item bin\Release\BetterAutoPlay.dll "C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers\BepInEx\plugins\BetterAutoPlay\"
+
+   # macOS
+   mkdir -p "/Users/danny/Library/Application Support/Steam/steamapps/common/Vampire Crawlers/BepInEx/plugins/BetterAutoPlay"
+   cp bin/Release/BetterAutoPlay.dll "/Users/danny/Library/Application Support/Steam/steamapps/common/Vampire Crawlers/BepInEx/plugins/BetterAutoPlay/"
    
    # Or manually copy the DLL to:
    # <Game Folder>\BepInEx\plugins\BetterAutoPlay\
