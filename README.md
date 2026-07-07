@@ -183,6 +183,16 @@ Vampire Crawlers/
    dotnet build -c Release -p:GameDir="/path/to/Vampire Crawlers"
    ```
 
+   If BepInEx generated interop assemblies somewhere else, pass `InteropDir`:
+   ```bash
+   dotnet build -c Release -p:InteropDir="/path/to/BepInEx/interop"
+   ```
+
+   On macOS, you can locate the generated interop folder with:
+   ```bash
+   find "/Users/danny/Library/Application Support/Steam/steamapps/common/Vampire Crawlers" -name Assembly-CSharp.dll -print
+   ```
+
 4. **Build the project**:
    ```bash
    dotnet build -c Release
@@ -211,6 +221,11 @@ Vampire Crawlers/
 - Make sure you installed BepInEx IL2CPP (not Mono)
 - Check the `BepInEx/LogOutput.log` file
 - Ensure the DLL is in `BepInEx/plugins/BetterAutoPlay/` folder
+
+**Build cannot find `Assembly-CSharp`, `Pancake`, or `UnityEngine`?**
+- Launch the game once through BepInEx and wait for the main menu before quitting
+- Check `BepInEx/LogOutput.log` for interop generation errors
+- Find the generated interop folder and pass it to the build with `-p:InteropDir="/path/to/interop"`
 
 **Game won't start?**
 - Make sure you're using the IL2CPP version

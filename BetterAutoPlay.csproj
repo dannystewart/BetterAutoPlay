@@ -12,7 +12,13 @@
     <GameDir Condition="'$(GameDir)' == '' And $([MSBuild]::IsOSPlatform('Windows'))">C:\Program Files (x86)\Steam\steamapps\common\Vampire Crawlers</GameDir>
     <GameDir Condition="'$(GameDir)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">/Users/danny/Library/Application Support/Steam/steamapps/common/Vampire Crawlers</GameDir>
     <BepInExDir>$(GameDir)/BepInEx</BepInExDir>
+    <InteropDir Condition="'$(InteropDir)' == ''">$(BepInExDir)/interop</InteropDir>
   </PropertyGroup>
+
+  <Target Name="ValidateBepInExReferences" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(BepInExDir)/core/BepInEx.Core.dll')" Text="BepInEx core assemblies were not found at '$(BepInExDir)/core'. Set GameDir or BepInExDir to the Vampire Crawlers BepInEx install path." />
+    <Error Condition="!Exists('$(InteropDir)/Assembly-CSharp.dll')" Text="BepInEx interop assemblies were not found at '$(InteropDir)'. Launch Vampire Crawlers once through BepInEx and confirm interop generation succeeded, or build with -p:InteropDir=&quot;/path/to/interop&quot;." />
+  </Target>
 
   <!-- BepInEx DLLs -->
   <ItemGroup>
@@ -37,59 +43,59 @@
   <!-- Game DLLs from BepInEx interop -->
   <ItemGroup>
     <Reference Include="Il2Cppmscorlib">
-      <HintPath>$(BepInExDir)/interop/Il2Cppmscorlib.dll</HintPath>
+      <HintPath>$(InteropDir)/Il2Cppmscorlib.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="Assembly-CSharp">
-      <HintPath>$(BepInExDir)/interop/Assembly-CSharp.dll</HintPath>
+      <HintPath>$(InteropDir)/Assembly-CSharp.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="Pancake">
-      <HintPath>$(BepInExDir)/interop/Pancake.dll</HintPath>
+      <HintPath>$(InteropDir)/Pancake.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>$(BepInExDir)/interop/UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(InteropDir)/UnityEngine.CoreModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.ImageConversionModule">
-      <HintPath>$(BepInExDir)/interop/UnityEngine.ImageConversionModule.dll</HintPath>
+      <HintPath>$(InteropDir)/UnityEngine.ImageConversionModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.UI">
-      <HintPath>$(BepInExDir)/interop/UnityEngine.UI.dll</HintPath>
+      <HintPath>$(InteropDir)/UnityEngine.UI.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.UIModule">
-      <HintPath>$(BepInExDir)/interop/UnityEngine.UIModule.dll</HintPath>
+      <HintPath>$(InteropDir)/UnityEngine.UIModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.InputLegacyModule">
-      <HintPath>$(BepInExDir)/interop/UnityEngine.InputLegacyModule.dll</HintPath>
+      <HintPath>$(InteropDir)/UnityEngine.InputLegacyModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="Unity.InputSystem">
-      <HintPath>$(BepInExDir)/interop/Unity.InputSystem.dll</HintPath>
+      <HintPath>$(InteropDir)/Unity.InputSystem.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="Unity.TextMeshPro">
-      <HintPath>$(BepInExDir)/interop/Unity.TextMeshPro.dll</HintPath>
+      <HintPath>$(InteropDir)/Unity.TextMeshPro.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.UnityWebRequestModule">
-      <HintPath>$(BepInExDir)/interop/UnityEngine.UnityWebRequestModule.dll</HintPath>
+      <HintPath>$(InteropDir)/UnityEngine.UnityWebRequestModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.UnityWebRequestTextureModule">
-      <HintPath>$(BepInExDir)/interop/UnityEngine.UnityWebRequestTextureModule.dll</HintPath>
+      <HintPath>$(InteropDir)/UnityEngine.UnityWebRequestTextureModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.UnityWebRequestWWWModule">
-      <HintPath>$(BepInExDir)/interop/UnityEngine.UnityWebRequestWWWModule.dll</HintPath>
+      <HintPath>$(InteropDir)/UnityEngine.UnityWebRequestWWWModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="Sirenix.Serialization">
-      <HintPath>$(BepInExDir)/interop/Sirenix.Serialization.dll</HintPath>
+      <HintPath>$(InteropDir)/Sirenix.Serialization.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>
